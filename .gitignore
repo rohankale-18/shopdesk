@@ -1,0 +1,8 @@
+.DS_Store
+.vscode/
+.idea/
+
+# Secrets (keep the examples)
+.env
+.env.*
+!.env.example

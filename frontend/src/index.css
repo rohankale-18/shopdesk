@@ -1,0 +1,144 @@
+@import "tailwindcss";
+@import "@fontsource-variable/instrument-sans";
+@import "@fontsource/jetbrains-mono/400.css";
+
+/* Design tokens. Components only use these names, so dark mode is just a
+   second set of values below. */
+@theme {
+  --font-sans: "Instrument Sans Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --color-paper: var(--paper);
+  --color-surface: var(--surface);
+  --color-sunken: var(--sunken);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-line: var(--line);
+  --color-cobalt: var(--cobalt);
+  --color-cobalt-ink: var(--cobalt-ink);
+  --color-cobalt-wash: var(--cobalt-wash);
+  --color-danger: var(--danger);
+  --color-danger-wash: var(--danger-wash);
+
+  /* Order + ticket status hues */
+  --color-st-amber: var(--st-amber);
+  --color-st-amber-wash: var(--st-amber-wash);
+  --color-st-blue: var(--st-blue);
+  --color-st-blue-wash: var(--st-blue-wash);
+  --color-st-violet: var(--st-violet);
+  --color-st-violet-wash: var(--st-violet-wash);
+  --color-st-green: var(--st-green);
+  --color-st-green-wash: var(--st-green-wash);
+  --color-st-red: var(--st-red);
+  --color-st-red-wash: var(--st-red-wash);
+  --color-st-slate: var(--st-slate);
+  --color-st-slate-wash: var(--st-slate-wash);
+}
+
+:root {
+  --paper: #f3f5f8;
+  --surface: #ffffff;
+  --sunken: #eceff4;
+  --ink: #172033;
+  --muted: #5b6577;
+  --faint: #8a93a3;
+  --line: #dce1ea;
+  --cobalt: #3346d3;
+  --cobalt-ink: #ffffff;
+  --cobalt-wash: #e8ebfb;
+  --danger: #c2372f;
+  --danger-wash: #fbeceb;
+
+  --st-amber: #9a6410;
+  --st-amber-wash: #fbf1dc;
+  --st-blue: #2b55b8;
+  --st-blue-wash: #e6eefb;
+  --st-violet: #6b3fc4;
+  --st-violet-wash: #efe9fb;
+  --st-green: #23764a;
+  --st-green-wash: #e3f3ea;
+  --st-red: #b3332b;
+  --st-red-wash: #fbe9e7;
+  --st-slate: #4f5a6b;
+  --st-slate-wash: #e9ecf1;
+
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #12151c;
+    --surface: #181c25;
+    --sunken: #1f2430;
+    --ink: #e6e9f0;
+    --muted: #a0a8b8;
+    --faint: #6f788a;
+    --line: #2a3040;
+    --cobalt: #7d8cff;
+    --cobalt-ink: #0e1220;
+    --cobalt-wash: #232a4d;
+    --danger: #f2817a;
+    --danger-wash: #3a1f1f;
+
+    --st-amber: #e7b45a;
+    --st-amber-wash: #33281a;
+    --st-blue: #86a8f0;
+    --st-blue-wash: #1e2a44;
+    --st-violet: #b49af0;
+    --st-violet-wash: #2a2242;
+    --st-green: #6fcf98;
+    --st-green-wash: #1a3226;
+    --st-red: #f08b84;
+    --st-red-wash: #3a1f1f;
+    --st-slate: #aab3c2;
+    --st-slate-wash: #262c38;
+
+    color-scheme: dark;
+  }
+}
+
+html {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+}
+
+/* Native <select> with a consistent chevron (keeps keyboard + mobile pickers). */
+.select-chrome {
+  appearance: none;
+  cursor: pointer;
+  padding-right: 28px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%238a93a3' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m4.5 6.5 3.5 3.5 3.5-3.5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+  background-size: 16px;
+}
+
+/* Money and counts line up in columns. */
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible {
+  outline: 2px solid var(--cobalt);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
