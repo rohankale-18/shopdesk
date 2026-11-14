@@ -66,7 +66,7 @@ export function TestData() {
               {seed.data.tickets} tickets and {seed.data.refunds} refunds.
             </p>
           )}
-          <p className="mb-3 text-[14px] text-muted">
+          <p className="mb-3 text-[14px] text-muted-foreground">
             Every dataset starts with these support cases. Each has one correct resolution, so they make good test
             cases for an AI agent.
           </p>
@@ -76,7 +76,7 @@ export function TestData() {
               return (
                 <li key={s} className="rounded-md border border-line px-3 py-2">
                   <div className="font-medium">{name.replace(/_/g, ' ')}</div>
-                  <div className="text-muted">{rest?.trim()}</div>
+                  <div className="text-muted-foreground">{rest?.trim()}</div>
                 </li>
               )
             })}

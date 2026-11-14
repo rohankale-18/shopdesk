@@ -52,16 +52,80 @@ async function request<T>(method: string, path: string, opts: { query?: Query; b
   if (res.status === 204) return undefined as T
 
   const data = await res.json().catch(() => null)
-  if (!res.ok) {
-    const err = (data as ApiErrorBody | null)?.error
-    throw new ApiError(
-      res.status,
-      err?.code ?? 'http_error',
-      err?.message ?? `Request failed with status ${res.status}.`,
-      err?.details ?? {},
-    )
-  }
+  if (!res.ok) throw toApiError(res.status, data)
   return data as T
+}
+
+function toApiError(status: number, data: unknown): ApiError {
+  const err = (data as ApiErrorBody | null)?.error
+  return new ApiError(
+    status,
+    err?.code ?? 'http_error',
+    err?.message ?? `Request failed with status ${status}.`,
+    err?.details ?? {},
+  )
+}
+
+/**
+ * POST and read the response as Server-Sent Events, calling `onEvent` for each one as it arrives.
+ * Errors before the stream starts are thrown as ApiError, like `request`. Pass `signal` to cancel.
+ */
+async function stream(
+  path: string,
+  body: unknown,
+  onEvent: (event: string, data: unknown) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  let res: Response
+  try {
+    res = await fetch(buildUrl(path), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      body: JSON.stringify(body),
+      signal,
+    })
+  } catch (e) {
+    if (signal?.aborted) throw e
+    throw new ApiError(0, 'network_error', "Can't reach the API. Is the backend running on port 8000?")
+  }
+  if (!res.ok || !res.body) throw toApiError(res.status, await res.json().catch(() => null))
+
+  // Events are separated by a blank line; each has an "event:" line and a "data:" line (JSON).
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader()
+  // Aborting the fetch doesn't always wake up a pending read(), so cancel the reader directly.
+  const cancel = () => void reader.cancel().catch(() => {})
+  signal?.addEventListener('abort', cancel, { once: true })
+  try {
+    await readEvents(reader, onEvent)
+  } finally {
+    signal?.removeEventListener('abort', cancel)
+    cancel() // also closes the connection if onEvent threw
+  }
+  if (signal?.aborted) throw new DOMException('The request was stopped.', 'AbortError')
+}
+
+async function readEvents(
+  reader: ReadableStreamDefaultReader<string>,
+  onEvent: (event: string, data: unknown) => void,
+): Promise<void> {
+  let buffer = ''
+  for (;;) {
+    const { value, done } = await reader.read()
+    if (done) return
+    buffer += value.replaceAll('\r\n', '\n')
+    let end: number
+    while ((end = buffer.indexOf('\n\n')) !== -1) {
+      const block = buffer.slice(0, end)
+      buffer = buffer.slice(end + 2)
+      let event = 'message'
+      let data = ''
+      for (const line of block.split('\n')) {
+        if (line.startsWith('event:')) event = line.slice(6).trim()
+        else if (line.startsWith('data:')) data += line.slice(5).trim()
+      }
+      if (data) onEvent(event, JSON.parse(data))
+    }
+  }
 }
 
 export const api = {
@@ -69,4 +133,5 @@ export const api = {
   post: <T>(path: string, body?: unknown, query?: Query) => request<T>('POST', path, { body, query }),
   patch: <T>(path: string, body: unknown) => request<T>('PATCH', path, { body }),
   delete: <T>(path: string) => request<T>('DELETE', path),
+  stream,
 }

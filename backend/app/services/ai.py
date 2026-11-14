@@ -1,12 +1,16 @@
 """Thin wrapper around the Groq chat-completions API.
 
 Everything AI-related goes through here so the rest of the app never touches
-the SDK directly. The chatbot will build on `complete()`: it accepts the full
-OpenAI-style message list and optional `tools`, so tool calling over the
-ShopDesk data can be added without changing this layer.
+the SDK directly.
+
+- `complete()` returns the whole reply at once. It accepts `tools`, so tool
+  calling over the ShopDesk data can be built on it.
+- `stream()` yields the reply text piece by piece, for live chat UIs.
 """
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
@@ -46,32 +50,11 @@ def get_client(settings: Settings | None = None) -> Groq:
     return _client(settings.groq_api_key, settings.ai_timeout_seconds, settings.ai_max_retries)
 
 
-def complete(
-    messages: list[Message],
-    *,
-    tools: list[dict[str, Any]] | None = None,
-    model: str | None = None,
-    temperature: float | None = None,
-    max_tokens: int | None = None,
-    settings: Settings | None = None,
-    **extra: Any,
-) -> Completion:
-    """Run one chat completion and map provider errors onto our API errors."""
-    settings = settings or get_settings()
-    client = get_client(settings)
-
-    kwargs: dict[str, Any] = {
-        "model": model or settings.ai_model,
-        "messages": messages,
-        "temperature": settings.ai_temperature if temperature is None else temperature,
-        "max_tokens": max_tokens or settings.ai_max_tokens,
-        **extra,
-    }
-    if tools:
-        kwargs["tools"] = tools
-
+@contextmanager
+def _provider_errors() -> Iterator[None]:
+    """Turn Groq SDK exceptions into our API errors (503 / 502 with a clear message)."""
     try:
-        resp = client.chat.completions.create(**kwargs)
+        yield
     except groq.AuthenticationError as e:
         raise ServiceUnavailableError("The Groq API key was rejected. Check GROQ_API_KEY.") from e
     except groq.RateLimitError as e:
@@ -87,6 +70,44 @@ def complete(
             details={"provider_message": e.message},
         ) from e
 
+
+def _request(
+    messages: list[Message],
+    settings: Settings,
+    model: str | None,
+    temperature: float | None,
+    max_tokens: int | None,
+    extra: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "model": model or settings.ai_model,
+        "messages": messages,
+        "temperature": settings.ai_temperature if temperature is None else temperature,
+        "max_tokens": max_tokens or settings.ai_max_tokens,
+        **extra,
+    }
+
+
+def complete(
+    messages: list[Message],
+    *,
+    tools: list[dict[str, Any]] | None = None,
+    model: str | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    settings: Settings | None = None,
+    **extra: Any,
+) -> Completion:
+    """Run one chat completion and return the whole reply."""
+    settings = settings or get_settings()
+    client = get_client(settings)
+    kwargs = _request(messages, settings, model, temperature, max_tokens, extra)
+    if tools:
+        kwargs["tools"] = tools
+
+    with _provider_errors():
+        resp = client.chat.completions.create(**kwargs)
+
     choice = resp.choices[0]
     usage_fields = {"prompt_tokens", "completion_tokens", "total_tokens"}
     usage = resp.usage.model_dump(include=usage_fields) if resp.usage else {}
@@ -98,3 +119,35 @@ def complete(
         usage=usage,
         raw_message=choice.message,
     )
+
+
+def stream(
+    messages: list[Message],
+    *,
+    model: str | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    settings: Settings | None = None,
+    **extra: Any,
+) -> Iterator[str]:
+    """Start a streamed completion and return an iterator over the reply's text pieces.
+
+    The request is sent *before* this returns, so setup problems (no API key, key
+    rejected, rate limit) raise right away, while the caller can still answer with a
+    normal error response. Problems after that raise from the iterator.
+    """
+    settings = settings or get_settings()
+    client = get_client(settings)
+    kwargs = _request(messages, settings, model, temperature, max_tokens, extra)
+
+    with _provider_errors():
+        chunks = client.chat.completions.create(**kwargs, stream=True)
+
+    def texts() -> Iterator[str]:
+        with _provider_errors():
+            for chunk in chunks:
+                # Some chunks carry no text (role headers, reasoning, final usage stats).
+                if chunk.choices and chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+
+    return texts()

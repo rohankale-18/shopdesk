@@ -1,7 +1,10 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { api } from './client'
+import { api, ApiError } from './client'
 import type {
+  AIStatus,
+  Conversation,
+  ConversationSummary,
   Customer,
   CustomerDetail,
   CustomerInput,
@@ -15,6 +18,7 @@ import type {
   RefundReason,
   SeedRequest,
   SeedResult,
+  SendMessageResult,
   StatsOverview,
   Ticket,
   TicketMessage,
@@ -156,4 +160,91 @@ export function useSeed() {
     mutationFn: (body: SeedRequest) => api.post<SeedResult>('/api/admin/seed', body),
     onSuccess: () => qc.invalidateQueries(),
   })
+}
+
+// ---------- AI chat ----------
+
+const chatKeys = {
+  status: ['ai', 'status'] as const,
+  list: ['chat', 'list'] as const,
+  conversation: (id: number) => ['chat', 'conversation', id] as const,
+}
+
+export const useAIStatus = () =>
+  useQuery({ queryKey: chatKeys.status, queryFn: () => api.get<AIStatus>('/api/ai/status'), staleTime: 60_000 })
+
+export const useConversations = (enabled = true) =>
+  useQuery({
+    queryKey: chatKeys.list,
+    queryFn: () => api.get<ConversationSummary[]>('/api/chat/conversations'),
+    enabled,
+  })
+
+export const useConversation = (id: number | null) =>
+  useQuery({
+    queryKey: chatKeys.conversation(id ?? 0),
+    queryFn: () => api.get<Conversation>(`/api/chat/conversations/${id}`),
+    enabled: !!id,
+    staleTime: Infinity, // only this tab changes it, and we update the cache ourselves
+  })
+
+export function useDeleteConversation() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => api.delete<void>(`/api/chat/conversations/${id}`),
+    onSuccess: (_, id) => {
+      qc.removeQueries({ queryKey: chatKeys.conversation(id) })
+      return qc.invalidateQueries({ queryKey: chatKeys.list })
+    },
+  })
+}
+
+export function useCreateConversation() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => api.post<Conversation>('/api/chat/conversations'),
+    onSuccess: (convo) => {
+      qc.setQueryData(chatKeys.conversation(convo.id), convo)
+      return qc.invalidateQueries({ queryKey: chatKeys.list })
+    },
+  })
+}
+
+/**
+ * Returns `send(id, content, { onDelta, signal })`. The reply streams in through `onDelta`;
+ * the promise resolves with both saved messages, or rejects with an ApiError (or AbortError).
+ */
+export function useSendChatMessage() {
+  const qc = useQueryClient()
+
+  return async (
+    id: number,
+    content: string,
+    opts: { onDelta: (text: string) => void; signal?: AbortSignal },
+  ): Promise<SendMessageResult> => {
+    let result = null as SendMessageResult | null
+    await api.stream(
+      `/api/chat/conversations/${id}/messages`,
+      { content },
+      (event, data) => {
+        if (event === 'delta') opts.onDelta((data as { text: string }).text)
+        else if (event === 'done') result = data as SendMessageResult
+        else if (event === 'error') {
+          const { code, message } = data as { code: string; message: string }
+          throw new ApiError(502, code, message)
+        }
+      },
+      opts.signal,
+    )
+    if (!result) throw new ApiError(0, 'stream_incomplete', 'The reply was cut off. Please try again.')
+
+    // The backend saved both messages. Show them right away, then refetch in the
+    // background to pick up server-side changes (the first message sets the title).
+    const { user_message, assistant_message } = result
+    qc.setQueryData<Conversation>(chatKeys.conversation(id), (old) =>
+      old ? { ...old, messages: [...old.messages, user_message, assistant_message] } : old,
+    )
+    void qc.invalidateQueries({ queryKey: ['chat'] }) // the list and this conversation
+    return result
+  }
 }

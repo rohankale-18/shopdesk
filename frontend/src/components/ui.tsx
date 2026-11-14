@@ -56,7 +56,7 @@ export function Priority({ value }: { value: TicketPriority }) {
   const level = { low: 1, medium: 2, high: 3, urgent: 4 }[value]
   const color = value === 'urgent' ? 'bg-danger' : value === 'high' ? 'bg-st-amber' : 'bg-faint'
   return (
-    <span className="inline-flex items-center gap-2 text-[13px] text-muted">
+    <span className="inline-flex items-center gap-2 text-[13px] text-muted-foreground">
       <span className="flex h-3 items-end gap-[2px]" aria-hidden>
         {[1, 2, 3, 4].map((i) => (
           <span
@@ -79,7 +79,7 @@ const BTN: Record<BtnVariant, string> = {
   primary: 'bg-cobalt text-cobalt-ink hover:brightness-110',
   secondary: 'bg-surface text-ink border border-line hover:bg-sunken',
   danger: 'bg-surface text-danger border border-line hover:bg-danger-wash',
-  ghost: 'text-muted hover:text-ink hover:bg-sunken',
+  ghost: 'text-muted-foreground hover:text-ink hover:bg-sunken',
 }
 
 export function Button({
@@ -140,7 +140,7 @@ export function Select<T extends string>({
 export function Field({ label: text, error, children }: { label: string; error?: string; children: ReactNode }) {
   return (
     <label className="flex flex-col gap-1">
-      <span className="text-[13px] font-medium text-muted">{text}</span>
+      <span className="text-[13px] font-medium text-muted-foreground">{text}</span>
       {children}
       {error && <span className="text-[12px] text-danger">{error}</span>}
     </label>
@@ -157,7 +157,7 @@ export function PageHeader({ title, subtitle, actions }: { title: ReactNode; sub
     <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
       <div className="min-w-0">
         <h1 className="text-[26px] font-semibold leading-tight tracking-[-0.01em]">{title}</h1>
-        {subtitle && <div className="mt-1 text-[14px] text-muted">{subtitle}</div>}
+        {subtitle && <div className="mt-1 text-[14px] text-muted-foreground">{subtitle}</div>}
       </div>
       {actions && <div className="flex items-center gap-2">{actions}</div>}
     </div>
@@ -215,7 +215,7 @@ export function Table({
               <th
                 key={i}
                 className={cx(
-                  'whitespace-nowrap px-4 py-2 text-[12.5px] font-medium text-muted',
+                  'whitespace-nowrap px-4 py-2 text-[12.5px] font-medium text-muted-foreground',
                   alignRight.includes(i) && 'text-right',
                 )}
               >
@@ -246,7 +246,7 @@ export function Pagination({
   onPage: (p: number) => void
 }) {
   return (
-    <div className="flex items-center justify-between border-t border-line px-4 py-2.5 text-[13px] text-muted">
+    <div className="flex items-center justify-between border-t border-line px-4 py-2.5 text-[13px] text-muted-foreground">
       <span className="num">
         {total.toLocaleString()} {total === 1 ? 'result' : 'results'}
       </span>
@@ -288,7 +288,7 @@ export function ErrorState({ error, onRetry }: { error: unknown; onRetry?: () =>
 }
 
 export function Empty({ children }: { children: ReactNode }) {
-  return <div className="px-4 py-10 text-center text-[14px] text-muted">{children}</div>
+  return <div className="px-4 py-10 text-center text-[14px] text-muted-foreground">{children}</div>
 }
 
 export function MutationError({ error }: { error: unknown }) {

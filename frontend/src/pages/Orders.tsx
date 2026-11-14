@@ -87,11 +87,11 @@ export function Orders() {
                       {o.number}
                     </Link>
                   </Td>
-                  <Td className="whitespace-nowrap text-muted">{date(o.placed_at)}</Td>
+                  <Td className="whitespace-nowrap text-muted-foreground">{date(o.placed_at)}</Td>
                   <Td>
                     <OrderBadge status={o.status} />
                   </Td>
-                  <Td className="num text-muted">{o.item_count}</Td>
+                  <Td className="num text-muted-foreground">{o.item_count}</Td>
                   <Td className="num text-right font-medium">{money(o.total_cents)}</Td>
                 </tr>
               ))}
@@ -115,7 +115,7 @@ export function OrderDetail() {
 
   return (
     <>
-      <Link to="/orders" className="mb-3 inline-block text-[13px] text-muted hover:text-ink">
+      <Link to="/orders" className="mb-3 inline-block text-[13px] text-muted-foreground hover:text-ink">
         All orders
       </Link>
       <PageHeader
@@ -135,9 +135,9 @@ export function OrderDetail() {
           <div className="grid gap-6 md:grid-cols-[1fr_auto] md:items-start">
             <LifecycleTrack order={o} />
             <div className="md:min-w-[220px] md:border-l md:border-line md:pl-6">
-              <div className="text-[13px] text-muted">Tracking</div>
+              <div className="text-[13px] text-muted-foreground">Tracking</div>
               <div className="font-mono text-[13px]">{o.tracking_number ?? 'Not shipped yet'}</div>
-              <div className="mt-3 text-[13px] text-muted">Ship to</div>
+              <div className="mt-3 text-[13px] text-muted-foreground">Ship to</div>
               <div className="text-[13.5px]">{o.shipping_address}</div>
             </div>
           </div>
@@ -149,8 +149,8 @@ export function OrderDetail() {
               {o.items.map((i) => (
                 <tr key={i.id}>
                   <Td>{i.product_name}</Td>
-                  <Td className="num text-muted">{money(i.unit_price_cents)}</Td>
-                  <Td className="num text-muted">{i.quantity}</Td>
+                  <Td className="num text-muted-foreground">{money(i.unit_price_cents)}</Td>
+                  <Td className="num text-muted-foreground">{i.quantity}</Td>
                   <Td className="num text-right">{money(i.line_total_cents)}</Td>
                 </tr>
               ))}
@@ -158,8 +158,8 @@ export function OrderDetail() {
                 <tr key={`r${r.id}`} className="text-st-red">
                   <Td>
                     Refund, {label(r.reason).toLowerCase()}
-                    {r.note && <span className="text-muted">: {r.note}</span>}
-                    <div className="text-[12px] text-muted">{dateTime(r.created_at)}</div>
+                    {r.note && <span className="text-muted-foreground">: {r.note}</span>}
+                    <div className="text-[12px] text-muted-foreground">{dateTime(r.created_at)}</div>
                   </Td>
                   <Td>{''}</Td>
                   <Td>{''}</Td>

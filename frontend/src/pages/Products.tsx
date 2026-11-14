@@ -95,10 +95,10 @@ function ProductRow({ p }: { p: Product }) {
     <tr className={cx(!p.is_active && 'opacity-55')}>
       <Td>
         <div className="font-medium">{p.name}</div>
-        {!p.is_active && <div className="text-[12px] text-muted">Archived</div>}
+        {!p.is_active && <div className="text-[12px] text-muted-foreground">Archived</div>}
       </Td>
-      <Td className="font-mono text-[12.5px] text-muted">{p.sku}</Td>
-      <Td className="text-muted">{label(p.category)}</Td>
+      <Td className="font-mono text-[12.5px] text-muted-foreground">{p.sku}</Td>
+      <Td className="text-muted-foreground">{label(p.category)}</Td>
       <Td className="num">{money(p.price_cents)}</Td>
       <Td>
         {editing ? (

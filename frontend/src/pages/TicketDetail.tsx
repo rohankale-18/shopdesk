@@ -34,7 +34,7 @@ export function TicketDetail() {
 
   return (
     <>
-      <Link to="/tickets" className="mb-3 inline-block text-[13px] text-muted hover:text-ink">
+      <Link to="/tickets" className="mb-3 inline-block text-[13px] text-muted-foreground hover:text-ink">
         All tickets
       </Link>
       <PageHeader
@@ -76,7 +76,7 @@ function Thread({ ticket }: { ticket: Ticket }) {
                 <span className="text-[13.5px] font-semibold">
                   {isCustomer ? ticket.customer.name : m.author === 'agent' ? 'Support' : 'System'}
                 </span>
-                <time className="text-[12px] text-muted" dateTime={m.created_at}>
+                <time className="text-[12px] text-muted-foreground" dateTime={m.created_at}>
                   {dateTime(m.created_at)}
                 </time>
               </div>
@@ -110,7 +110,7 @@ function Reply({ ticket }: { ticket: Ticket }) {
     return (
       <Panel>
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <p className="text-[14px] text-muted">This ticket is closed. Reopen it to reply.</p>
+          <p className="text-[14px] text-muted-foreground">This ticket is closed. Reopen it to reply.</p>
           <Button onClick={() => update.mutate({ id: ticket.id, status: 'open' })}>Reopen ticket</Button>
         </div>
       </Panel>
@@ -202,9 +202,9 @@ function CustomerPanel({ ticket }: { ticket: Ticket }) {
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="font-medium">{c.name}</div>
-          <div className="truncate text-[13px] text-muted">{c.email}</div>
+          <div className="truncate text-[13px] text-muted-foreground">{c.email}</div>
           {(c.city || c.country) && (
-            <div className="text-[13px] text-muted">{[c.city, c.country].filter(Boolean).join(', ')}</div>
+            <div className="text-[13px] text-muted-foreground">{[c.city, c.country].filter(Boolean).join(', ')}</div>
           )}
         </div>
         {c.tier !== 'standard' && <Badge tone={c.tier === 'platinum' ? 'violet' : 'amber'}>{label(c.tier)}</Badge>}
@@ -243,7 +243,7 @@ function LinkedOrder({ orderId }: { orderId: number }) {
                 <span className="min-w-0 truncate">
                   {i.quantity} × {i.product_name}
                 </span>
-                <span className="num shrink-0 text-muted">{money(i.line_total_cents)}</span>
+                <span className="num shrink-0 text-muted-foreground">{money(i.line_total_cents)}</span>
               </li>
             ))}
             {q.data.refunded_cents > 0 && (
