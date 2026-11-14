@@ -57,11 +57,11 @@ function Headline({ s }: { s: StatsOverview }) {
       <div className="grid gap-6 lg:grid-cols-[240px_1fr]">
         <div className="flex flex-col justify-between gap-5">
           <div>
-            <div className="text-[13px] text-muted">{shown ? date(shown.date) : 'Revenue, last 30 days'}</div>
+            <div className="text-[13px] text-muted-foreground">{shown ? date(shown.date) : 'Revenue, last 30 days'}</div>
             <div className="num mt-1 text-[34px] font-semibold leading-none tracking-[-0.02em]">
               {money(shown ? shown.revenue_cents : last30)}
             </div>
-            <div className="num mt-1.5 text-[13px] text-muted">
+            <div className="num mt-1.5 text-[13px] text-muted-foreground">
               {shown ? `${shown.orders} orders` : `${orders30} orders`}
             </div>
           </div>
@@ -72,7 +72,7 @@ function Headline({ s }: { s: StatsOverview }) {
               ['Refunded', moneyCompact(s.refunded_cents)],
             ].map(([k, v]) => (
               <div key={k} className="flex flex-col lg:flex-row lg:items-baseline lg:justify-between">
-                <dt className="text-[13px] text-muted">{k}</dt>
+                <dt className="text-[13px] text-muted-foreground">{k}</dt>
                 <dd className="num text-[15px] font-medium">{v}</dd>
               </div>
             ))}
@@ -101,7 +101,7 @@ function Headline({ s }: { s: StatsOverview }) {
               </button>
             ))}
           </div>
-          <div className="mt-2 flex justify-between border-t border-line pt-1.5 text-[12px] text-muted">
+          <div className="mt-2 flex justify-between border-t border-line pt-1.5 text-[12px] text-muted-foreground">
             <span>{date(days[0].date)}</span>
             <span>Today</span>
           </div>
@@ -138,7 +138,7 @@ function NeedsReply() {
                   <Priority value={t.priority} />
                 </span>
                 <span className="min-w-0 flex-1 truncate text-[14px]">{t.subject}</span>
-                <span className="shrink-0 text-[12px] text-muted">{relative(t.created_at)}</span>
+                <span className="shrink-0 text-[12px] text-muted-foreground">{relative(t.created_at)}</span>
               </Link>
             </li>
           ))}
@@ -166,7 +166,7 @@ function OrdersByStatus({ counts, total }: { counts: Record<OrderStatus, number>
                 <span className={cx('h-2.5 w-2.5 rounded-sm', TONE_BG[ORDER_TONE[s]])} aria-hidden />
                 {label(s)}
               </span>
-              <span className="num text-muted">{counts[s]}</span>
+              <span className="num text-muted-foreground">{counts[s]}</span>
             </Link>
           </li>
         ))}
@@ -193,7 +193,7 @@ function LowStock({ s }: { s: StatsOverview }) {
           {s.low_stock_products.map((p) => (
             <tr key={p.id}>
               <Td>{p.name}</Td>
-              <Td className="font-mono text-[12.5px] text-muted">{p.sku}</Td>
+              <Td className="font-mono text-[12.5px] text-muted-foreground">{p.sku}</Td>
               <Td className="num">{money(p.price_cents)}</Td>
               <Td className={cx('num font-medium', p.stock === 0 ? 'text-danger' : 'text-st-amber')}>
                 {p.stock === 0 ? 'Sold out' : p.stock}

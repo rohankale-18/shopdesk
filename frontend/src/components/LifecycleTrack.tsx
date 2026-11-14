@@ -66,7 +66,7 @@ export function LifecycleTrack({ order, compact = false }: { order: Order; compa
             </div>
             <div className="mt-2 pr-2">
               <div className={cx('text-[13px] font-medium', st.done ? 'text-ink' : 'text-faint')}>{st.label}</div>
-              <div className="num text-[12px] text-muted">{st.at ? (compact ? date(st.at).replace(/, \d{4}$/, '') : dateTime(st.at)) : st.done ? 'Confirmed' : 'Not yet'}</div>
+              <div className="num text-[12px] text-muted-foreground">{st.at ? (compact ? date(st.at).replace(/, \d{4}$/, '') : dateTime(st.at)) : st.done ? 'Confirmed' : 'Not yet'}</div>
             </div>
           </li>
         )

@@ -30,7 +30,7 @@ import { useUrlFilters } from '../lib/useUrlFilters'
 
 const TierBadge = ({ tier }: { tier: CustomerTier }) =>
   tier === 'standard' ? (
-    <span className="text-[13px] text-muted">Standard</span>
+    <span className="text-[13px] text-muted-foreground">Standard</span>
   ) : (
     <Badge tone={tier === 'platinum' ? 'violet' : 'amber'}>{label(tier)}</Badge>
   )
@@ -84,12 +84,12 @@ export function Customers() {
                       {c.name}
                     </Link>
                   </Td>
-                  <Td className="text-muted">{c.email}</Td>
-                  <Td className="text-muted">{[c.city, c.country].filter(Boolean).join(', ')}</Td>
+                  <Td className="text-muted-foreground">{c.email}</Td>
+                  <Td className="text-muted-foreground">{[c.city, c.country].filter(Boolean).join(', ')}</Td>
                   <Td>
                     <TierBadge tier={c.tier} />
                   </Td>
-                  <Td className="whitespace-nowrap text-muted">{date(c.created_at)}</Td>
+                  <Td className="whitespace-nowrap text-muted-foreground">{date(c.created_at)}</Td>
                 </tr>
               ))}
             </Table>
@@ -162,7 +162,7 @@ export function CustomerDetail() {
 
   return (
     <>
-      <Link to="/customers" className="mb-3 inline-block text-[13px] text-muted hover:text-ink">
+      <Link to="/customers" className="mb-3 inline-block text-[13px] text-muted-foreground hover:text-ink">
         All customers
       </Link>
       <PageHeader
@@ -187,7 +187,7 @@ export function CustomerDetail() {
             ['Customer since', date(c.created_at)],
           ].map(([k, v]) => (
             <div key={k}>
-              <dt className="text-[13px] text-muted">{k}</dt>
+              <dt className="text-[13px] text-muted-foreground">{k}</dt>
               <dd className="num text-[20px] font-semibold">{v}</dd>
             </div>
           ))}
@@ -210,7 +210,7 @@ export function CustomerDetail() {
                     <Link to={`/orders/${o.id}`} className="flex items-center gap-3 px-4 py-2.5 hover:bg-sunken">
                       <span className="font-mono text-[12.5px]">{o.number}</span>
                       <OrderBadge status={o.status} />
-                      <span className="ml-auto text-[12.5px] text-muted">{date(o.placed_at)}</span>
+                      <span className="ml-auto text-[12.5px] text-muted-foreground">{date(o.placed_at)}</span>
                       <span className="num w-20 text-right text-[13.5px] font-medium">{money(o.total_cents)}</span>
                     </Link>
                   </li>
@@ -237,7 +237,7 @@ export function CustomerDetail() {
                   <Link to={`/tickets/${t.id}`} className="flex items-center gap-3 px-4 py-2.5 hover:bg-sunken">
                     <span className="min-w-0 flex-1 truncate text-[13.5px]">{t.subject}</span>
                     <TicketBadge status={t.status} />
-                    <span className="w-16 text-right text-[12px] text-muted">{relative(t.created_at)}</span>
+                    <span className="w-16 text-right text-[12px] text-muted-foreground">{relative(t.created_at)}</span>
                   </Link>
                 </li>
               ))}

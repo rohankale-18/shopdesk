@@ -202,3 +202,36 @@ export interface SeedResult {
 export interface ApiErrorBody {
   error: { code: string; message: string; details: Record<string, unknown> }
 }
+
+// ---------- AI chat ----------
+
+export interface AIStatus {
+  enabled: boolean
+  provider: string
+  model: string
+}
+
+export type ChatRole = 'user' | 'assistant'
+
+export interface ChatMessage {
+  id: number
+  role: ChatRole
+  content: string
+  created_at: string
+}
+
+export interface ConversationSummary {
+  id: number
+  title: string
+  created_at: string
+  updated_at: string
+}
+
+export interface Conversation extends ConversationSummary {
+  messages: ChatMessage[]
+}
+
+export interface SendMessageResult {
+  user_message: ChatMessage
+  assistant_message: ChatMessage
+}

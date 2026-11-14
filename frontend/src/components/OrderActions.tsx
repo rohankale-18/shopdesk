@@ -24,7 +24,7 @@ export function OrderActions({ order }: { order: Order }) {
   const canRefund = CAN_REFUND.includes(order.status) && order.refundable_cents > 0
 
   if (!next && !canCancel && !canRefund) {
-    return <p className="text-[13px] text-muted">No actions available for a {order.status} order.</p>
+    return <p className="text-[13px] text-muted-foreground">No actions available for a {order.status} order.</p>
   }
 
   return (
@@ -87,7 +87,7 @@ function RefundForm({ order, onDone }: { order: Order; onDone: () => void }) {
         refund.mutate({ id: order.id, amount_cents: cents, reason, note }, { onSuccess: onDone })
       }}
     >
-      <div className="text-[13px] text-muted">
+      <div className="text-[13px] text-muted-foreground">
         {money(order.refundable_cents)} of {money(order.total_cents)} can still be refunded.
       </div>
       <div className="grid gap-3 sm:grid-cols-2">

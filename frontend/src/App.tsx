@@ -1,3 +1,4 @@
+import { lazy, Suspense } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter, Link, Route, Routes } from 'react-router-dom'
 
@@ -11,6 +12,9 @@ import { Products } from './pages/Products'
 import { TestData } from './pages/TestData'
 import { TicketDetail } from './pages/TicketDetail'
 import { Tickets } from './pages/Tickets'
+
+// Lazy: the chat UI (Base UI, message scroller, Markdown) loads only when the page is opened.
+const Assistant = lazy(() => import('./pages/Assistant'))
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -48,6 +52,14 @@ export default function App() {
             <Route path="customers/:id" element={<CustomerDetail />} />
             <Route path="products" element={<Products />} />
             <Route path="data" element={<TestData />} />
+            <Route
+              path="assistant/:id?"
+              element={
+                <Suspense fallback={null}>
+                  <Assistant />
+                </Suspense>
+              }
+            />
             <Route path="*" element={<NotFound />} />
           </Route>
         </Routes>

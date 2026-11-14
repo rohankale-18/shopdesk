@@ -259,3 +259,38 @@ class TicketMessage(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
     ticket: Mapped[Ticket] = relationship(back_populates="messages")
+
+
+# ---------- AI chat ----------
+
+
+class ChatRole(StrEnum):
+    user = "user"
+    assistant = "assistant"
+
+
+class ChatConversation(TimestampMixin, Base):
+    __tablename__ = "chat_conversations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(120), default="New chat")
+
+    messages: Mapped[list["ChatMessage"]] = relationship(
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        order_by="ChatMessage.id",
+    )
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("chat_conversations.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[ChatRole] = mapped_column(_enum(ChatRole, "chat_role"))
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+    conversation: Mapped[ChatConversation] = relationship(back_populates="messages")

@@ -1,6 +1,7 @@
-import { NavLink, Outlet } from 'react-router-dom'
+import { NavLink, Outlet, useMatch } from 'react-router-dom'
 
 import { useStats } from '../api/hooks'
+import { ChatLauncher } from './ChatLauncher'
 import { cx } from './ui'
 
 // Same origin by default: Vite (dev) and nginx (Docker) both proxy /docs to FastAPI.
@@ -12,6 +13,7 @@ const NAV = [
   { to: '/orders', label: 'Orders' },
   { to: '/customers', label: 'Customers' },
   { to: '/products', label: 'Products' },
+  { to: '/assistant', label: 'Assistant' },
   { to: '/data', label: 'Test data', mobileOnly: true },
 ]
 
@@ -26,22 +28,29 @@ function Logo() {
 
 export function Layout() {
   const { data: stats } = useStats()
+  // The assistant fills the whole screen (like ChatGPT); other pages scroll in a centered column.
+  const fullBleed = useMatch({ path: '/assistant', end: false }) !== null
 
   const link = ({ isActive }: { isActive: boolean }) =>
     cx(
       'flex items-center justify-between gap-3 rounded-md px-2.5 py-1.5 text-[14px] whitespace-nowrap',
-      isActive ? 'bg-surface font-semibold text-ink shadow-[inset_0_0_0_1px_var(--line)]' : 'text-muted hover:text-ink',
+      isActive ? 'bg-surface font-semibold text-ink shadow-[inset_0_0_0_1px_var(--line)]' : 'text-muted-foreground hover:text-ink',
     )
 
   return (
-    <div className="min-h-screen md:grid md:grid-cols-[220px_1fr]">
+    <div
+      className={cx(
+        'md:grid md:grid-cols-[220px_1fr]',
+        fullBleed ? 'flex h-dvh flex-col md:grid-rows-1' : 'min-h-screen',
+      )}
+    >
       <aside className="border-b border-line md:sticky md:top-0 md:h-screen md:border-r md:border-b-0">
         <div className="flex h-full flex-col gap-4 p-3 md:p-4">
           <div className="flex items-center gap-2.5 px-1">
             <Logo />
             <div className="leading-tight">
               <div className="text-[15px] font-semibold">ShopDesk</div>
-              <div className="text-[12px] text-muted">Support console</div>
+              <div className="text-[12px] text-muted-foreground">Support console</div>
             </div>
           </div>
 
@@ -67,18 +76,26 @@ export function Layout() {
             <NavLink to="/data" className={link}>
               Test data
             </NavLink>
-            <a href={API_DOCS} target="_blank" rel="noreferrer" className="rounded-md px-2.5 py-1.5 text-[14px] text-muted hover:text-ink">
+            <a href={API_DOCS} target="_blank" rel="noreferrer" className="rounded-md px-2.5 py-1.5 text-[14px] text-muted-foreground hover:text-ink">
               API docs
             </a>
           </div>
         </div>
       </aside>
 
-      <main className="min-w-0 px-4 py-6 md:px-8 md:py-8">
-        <div className="mx-auto max-w-[1180px]">
+      {fullBleed ? (
+        <main className="min-h-0 min-w-0 flex-1 md:h-dvh">
           <Outlet />
-        </div>
-      </main>
+        </main>
+      ) : (
+        <main className="min-w-0 px-4 py-6 md:px-8 md:py-8">
+          <div className="mx-auto max-w-[1180px]">
+            <Outlet />
+          </div>
+        </main>
+      )}
+
+      <ChatLauncher />
     </div>
   )
 }

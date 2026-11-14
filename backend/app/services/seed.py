@@ -219,8 +219,10 @@ class SeedSummary:
 def reset_database(db: Session) -> None:
     bind = db.get_bind()
     db.close()
-    Base.metadata.drop_all(bind=bind)
-    Base.metadata.create_all(bind=bind)
+    # Store data only: chat history isn't generated, so it survives a reseed.
+    tables = [t for t in Base.metadata.sorted_tables if not t.name.startswith("chat_")]
+    Base.metadata.drop_all(bind=bind, tables=tables)
+    Base.metadata.create_all(bind=bind, tables=tables)
 
 
 class _Gen:

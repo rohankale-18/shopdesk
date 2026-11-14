@@ -47,7 +47,7 @@ export function Tickets() {
             onClick={() => set('status', s)}
             className={cx(
               '-mb-px cursor-pointer border-b-2 px-3 py-2 text-[14px] whitespace-nowrap',
-              values.status === s ? 'border-cobalt font-semibold text-ink' : 'border-transparent text-muted hover:text-ink',
+              values.status === s ? 'border-cobalt font-semibold text-ink' : 'border-transparent text-muted-foreground hover:text-ink',
             )}
           >
             {s ? label(s) : 'All'}
@@ -103,15 +103,15 @@ export function Tickets() {
                     >
                       {t.subject}
                     </a>
-                    <div className="text-[12.5px] text-muted">
+                    <div className="text-[12.5px] text-muted-foreground">
                       #{t.id} in {label(t.category)}
                     </div>
                   </Td>
                   <Td>
                     <TicketBadge status={t.status} />
                   </Td>
-                  <Td className="text-muted">{t.assignee ? label(t.assignee) : 'Unassigned'}</Td>
-                  <Td className="whitespace-nowrap text-muted">{relative(t.updated_at)}</Td>
+                  <Td className="text-muted-foreground">{t.assignee ? label(t.assignee) : 'Unassigned'}</Td>
+                  <Td className="whitespace-nowrap text-muted-foreground">{relative(t.updated_at)}</Td>
                 </tr>
               ))}
             </Table>
