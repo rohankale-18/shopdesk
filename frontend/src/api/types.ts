@@ -213,10 +213,17 @@ export interface AIStatus {
 
 export type ChatRole = 'user' | 'assistant'
 
+/** A tool the assistant ran while writing a reply, e.g. "Looked up store overview". */
+export interface ToolUse {
+  name: string
+  label: string
+}
+
 export interface ChatMessage {
   id: number
   role: ChatRole
   content: string
+  tool_calls: ToolUse[]
   created_at: string
 }
 

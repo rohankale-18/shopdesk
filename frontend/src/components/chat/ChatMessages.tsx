@@ -1,7 +1,8 @@
 import { Suspense, useState } from 'react'
-import { CheckIcon, CopyIcon, SparklesIcon } from 'lucide-react'
+import { CheckIcon, CopyIcon, DatabaseIcon, SparklesIcon } from 'lucide-react'
 import { cn } from 'cn'
 
+import type { ToolUse } from '@/api/types'
 import { Bubble, BubbleContent } from '@/components/ui/bubble'
 import { Button } from '@/components/ui/button'
 import { Message, MessageContent, MessageFooter } from '@/components/ui/message'
@@ -50,16 +51,47 @@ export function UserMessage({ content }: { content: string }) {
   )
 }
 
+/** The tools the assistant ran for a reply, as small chips above it. */
+function ToolChips({ tools }: { tools: ToolUse[] }) {
+  return (
+    <ul className="mb-2 flex flex-wrap gap-1.5" aria-label="Tools used">
+      {tools.map((t, i) => (
+        <li
+          key={i}
+          title={t.name}
+          className="inline-flex items-center gap-1.5 rounded-full border border-line bg-paper px-2.5 py-1 text-[12px] text-muted-foreground"
+        >
+          <DatabaseIcon className="size-3.5" aria-hidden />
+          {t.label}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
 /** A reply: no bubble, full column width, so tables (and later charts) have room. */
-export function AssistantMessage({ content, streaming = false }: { content: string; streaming?: boolean }) {
+export function AssistantMessage({
+  content,
+  tools = [],
+  streaming = false,
+}: {
+  content: string
+  tools?: ToolUse[]
+  streaming?: boolean
+}) {
   return (
     <Message className="group/reply">
       <MessageContent className="gap-1">
-        <div className="chat-md text-[15px] leading-7 text-ink">
-          <Suspense fallback={<p className="whitespace-pre-wrap">{content}</p>}>
-            <ChatMarkdown>{content}</ChatMarkdown>
-          </Suspense>
-        </div>
+        {tools.length > 0 && <ToolChips tools={tools} />}
+        {content.trim() ? (
+          <div className="chat-md text-[15px] leading-7 text-ink">
+            <Suspense fallback={<p className="whitespace-pre-wrap">{content}</p>}>
+              <ChatMarkdown>{content}</ChatMarkdown>
+            </Suspense>
+          </div>
+        ) : (
+          streaming && <Typing />
+        )}
         {!streaming && (
           <MessageFooter className="-ml-2 px-0 opacity-0 transition-opacity group-hover/reply:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100">
             <CopyButton text={content} />

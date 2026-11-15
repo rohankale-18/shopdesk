@@ -5,7 +5,8 @@ the SDK directly.
 
 - `complete()` returns the whole reply at once. It accepts `tools`, so tool
   calling over the ShopDesk data can be built on it.
-- `stream()` yields the reply text piece by piece, for live chat UIs.
+- `stream()` yields the reply text piece by piece, for live chat UIs. Given
+  `tools`, it also yields the tool calls the model asks for (see `ToolCall`).
 """
 
 import logging
@@ -34,6 +35,20 @@ class Completion:
     tool_calls: list[Any] = field(default_factory=list)
     usage: dict[str, int] = field(default_factory=dict)
     raw_message: Any = None  # the SDK message, handy to append back into the history
+
+
+@dataclass
+class ToolCall:
+    """The model asking us to run one of our tools. `arguments` is a JSON string, as sent."""
+
+    id: str
+    name: str
+    arguments: str
+
+    def as_message_part(self) -> dict[str, Any]:
+        """How this call is written back into the history (inside the assistant message)."""
+        function = {"name": self.name, "arguments": self.arguments}
+        return {"id": self.id, "type": "function", "function": function}
 
 
 @lru_cache
@@ -124,13 +139,17 @@ def complete(
 def stream(
     messages: list[Message],
     *,
+    tools: list[dict[str, Any]] | None = None,
     model: str | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
     settings: Settings | None = None,
     **extra: Any,
-) -> Iterator[str]:
-    """Start a streamed completion and return an iterator over the reply's text pieces.
+) -> Iterator[str | ToolCall]:
+    """Start a streamed completion and return an iterator over the reply.
+
+    The iterator yields text pieces (`str`) as they arrive. If the model asks for tools,
+    it yields one `ToolCall` per tool at the end, once each call is complete.
 
     The request is sent *before* this returns, so setup problems (no API key, key
     rejected, rate limit) raise right away, while the caller can still answer with a
@@ -139,15 +158,29 @@ def stream(
     settings = settings or get_settings()
     client = get_client(settings)
     kwargs = _request(messages, settings, model, temperature, max_tokens, extra)
+    if tools:
+        kwargs["tools"] = tools
 
     with _provider_errors():
         chunks = client.chat.completions.create(**kwargs, stream=True)
 
-    def texts() -> Iterator[str]:
+    def pieces() -> Iterator[str | ToolCall]:
+        # A tool call can arrive split over several chunks: the id and name first, then the
+        # JSON arguments bit by bit. `index` says which call a piece belongs to.
+        calls: dict[int, ToolCall] = {}
         with _provider_errors():
             for chunk in chunks:
-                # Some chunks carry no text (role headers, reasoning, final usage stats).
-                if chunk.choices and chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content
+                if not chunk.choices:  # e.g. the final usage-only chunk
+                    continue
+                delta = chunk.choices[0].delta
+                if delta.content:
+                    yield delta.content
+                for part in delta.tool_calls or []:
+                    call = calls.setdefault(part.index, ToolCall(id="", name="", arguments=""))
+                    call.id = part.id or call.id
+                    if part.function:
+                        call.name += part.function.name or ""
+                        call.arguments += part.function.arguments or ""
+        yield from calls.values()
 
-    return texts()
+    return pieces()

@@ -294,3 +294,20 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
     conversation: Mapped[ChatConversation] = relationship(back_populates="messages")
+    # Tools the assistant ran while writing this message (empty for user messages).
+    tool_calls: Mapped[list["ChatToolCall"]] = relationship(
+        cascade="all, delete-orphan", order_by="ChatToolCall.id", lazy="selectin"
+    )
+
+
+class ChatToolCall(Base):
+    """One tool run during an assistant reply: shown as a chip in the chat, kept as a log."""
+
+    __tablename__ = "chat_tool_calls"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    message_id: Mapped[int] = mapped_column(ForeignKey("chat_messages.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(64))
+    arguments: Mapped[str] = mapped_column(Text)  # JSON, exactly as the model sent it
+    result: Mapped[str] = mapped_column(Text)  # JSON, exactly as the model received it
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

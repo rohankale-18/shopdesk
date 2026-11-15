@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import { startTransition, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { PanelLeftIcon, SquarePenIcon } from 'lucide-react'
 import { cn } from 'cn'
 
 import { ApiError } from '@/api/client'
+import type { ToolUse } from '@/api/types'
 import { useAIStatus, useConversation, useCreateConversation, useSendChatMessage } from '@/api/hooks'
 import { AssistantMark, AssistantMessage, Typing, UserMessage } from '@/components/chat/ChatMessages'
 import { preloadMarkdown } from '@/components/chat/lazyMarkdown'
@@ -26,11 +27,19 @@ const SUGGESTIONS = [
   { title: 'Draft an apology', prompt: 'Draft a polite apology for a delivery that is running late' },
   { title: 'Handle a damaged item', prompt: 'How should I respond to a customer asking for a refund on a damaged item?' },
   { title: 'Soften a message', prompt: 'Rewrite this to sound friendlier: "Your request has been denied."' },
-  { title: 'Escalation rules', prompt: 'When should a support ticket be escalated, and to whom?' },
+  { title: 'Store overview', prompt: 'How are we doing this month?' },
 ]
 
-// The message being answered right now and the reply so far. `savedId` is set once both are saved.
-type Turn = { conversationId: number | null; content: string; reply: string; savedId?: number }
+// The message being answered right now, the reply so far and the tools it ran.
+// `key` names its two rows on screen; `savedId` is set once both messages are saved.
+type Turn = {
+  key: string
+  conversationId: number | null
+  content: string
+  reply: string
+  tools: ToolUse[]
+  savedId?: number
+}
 
 function readSidebarPref(): boolean {
   try {
@@ -75,6 +84,12 @@ export default function Assistant() {
   const [drawerOpen, setDrawerOpen] = useState(false) // mobile
   const [draft, setDraft] = useState('')
   const [turn, setTurn] = useState<Turn | null>(null)
+  // Saved messages that started as live rows keep the live row's key. A new key would make
+  // React (and the scroller) treat them as new messages and jump.
+  const [rowKeys, setRowKeys] = useState<Record<number, string>>({})
+  // The conversation created by the first message of a new chat keeps the "new" scroller,
+  // instead of replacing it when the URL changes.
+  const [createdId, setCreatedId] = useState<number | null>(null)
   // Errors belong to the conversation they happened in.
   const [error, setError] = useState<{ conversationId: number | null; error: unknown } | null>(null)
 
@@ -94,6 +109,38 @@ export default function Assistant() {
     turn && turn.conversationId === activeId && !messages.some((m) => m.id === turn.savedId) ? turn : null
   const notFound = convo.error instanceof ApiError && convo.error.status === 404
   const isEmpty = !activeId && !liveTurn
+  // Saved and live messages in ONE list: React only matches keys within the same list, so this is
+  // what lets a live row keep its element when the saved copy replaces it.
+  const rows: { key: string; role: 'user' | 'assistant'; node: React.ReactNode }[] = messages.map((m) => ({
+    key: rowKeys[m.id] ?? String(m.id),
+    role: m.role,
+    node:
+      m.role === 'user' ? (
+        <UserMessage content={m.content} />
+      ) : (
+        <AssistantMessage content={m.content} tools={m.tool_calls} />
+      ),
+  }))
+  if (liveTurn) {
+    rows.push(
+      { key: `${liveTurn.key}-user`, role: 'user', node: <UserMessage content={liveTurn.content} /> },
+      {
+        key: `${liveTurn.key}-reply`,
+        role: 'assistant',
+        node:
+          // trim(): replies often start with a bare newline; keep the dots until real text arrives.
+          liveTurn.reply.trim() || liveTurn.tools.length ? (
+            <AssistantMessage content={liveTurn.reply} tools={liveTurn.tools} streaming />
+          ) : (
+            <Typing />
+          ),
+      },
+    )
+  }
+  const lastUserKey = rows.findLast((r) => r.role === 'user')?.key
+
+  // A fresh scroller per conversation, so each one opens at its latest message.
+  const scrollerKey = activeId === null || activeId === createdId ? 'new' : String(activeId)
 
   useEffect(preloadMarkdown, [])
 
@@ -122,21 +169,30 @@ export default function Assistant() {
     const controller = new AbortController()
     abortRef.current = controller
     let id = activeId
-    setTurn({ conversationId: id, content, reply: '' })
+    const key = `turn-${Date.now()}`
+    setTurn({ key, conversationId: id, content, reply: '', tools: [] })
     setDraft('')
     setError(null)
     try {
       if (!id) {
-        id = (await create.mutateAsync()).id
-        const newId = id
-        setTurn((t) => t && { ...t, conversationId: newId })
-        navigate(`/assistant/${id}`, { replace: true })
+        const newId = (await create.mutateAsync()).id
+        id = newId
+        // One render for all three (navigation alone would be a separate, later render).
+        startTransition(() => {
+          setCreatedId(newId)
+          setTurn((t) => t && { ...t, conversationId: newId })
+          navigate(`/assistant/${newId}`, { replace: true })
+        })
       }
-      const result = await send(id, content, {
+      await send(id, content, {
         onDelta: (piece) => setTurn((t) => t && { ...t, reply: t.reply + piece }),
+        onTool: (tool) => setTurn((t) => t && { ...t, tools: [...t.tools, tool] }),
+        onSaved: ({ user_message, assistant_message }) => {
+          setRowKeys((k) => ({ ...k, [user_message.id]: `${key}-user`, [assistant_message.id]: `${key}-reply` }))
+          setTurn((t) => t && { ...t, savedId: assistant_message.id })
+        },
         signal: controller.signal,
       })
-      setTurn((t) => t && { ...t, savedId: result.assistant_message.id })
     } catch (e) {
       // Stopped or failed: nothing was saved. Give the text back so it can be retried.
       setTurn(null)
@@ -251,7 +307,7 @@ export default function Assistant() {
                   <AssistantMark className="mb-4 size-12 [&_svg]:size-6" />
                   <h2 className="text-[26px] font-semibold tracking-tight">How can I help with support today?</h2>
                   <p className="mt-2 text-[14px] text-muted-foreground">
-                    Draft replies, handle tricky cases, or check support best practices.
+                    Draft replies, handle tricky cases, or ask how the store is doing.
                   </p>
                 </div>
                 {notices}
@@ -278,30 +334,17 @@ export default function Assistant() {
                 {activeId && convo.isLoading ? (
                   <div className="mx-auto w-full max-w-3xl px-4 pt-8 text-[14px] text-muted-foreground">Loading…</div>
                 ) : (
-                  // key: a fresh scroller per conversation, so each one opens at its latest message
-                  <MessageScrollerProvider key={activeId ?? 'new'} autoScroll defaultScrollPosition="end">
+                  <MessageScrollerProvider key={scrollerKey} defaultScrollPosition="end">
                     <MessageScroller>
                       <MessageScrollerViewport>
                         <MessageScrollerContent className="mx-auto w-full max-w-3xl gap-8 px-4 pt-6 pb-10">
-                          {messages.map((m) => (
-                            <MessageScrollerItem key={m.id} messageId={String(m.id)} scrollAnchor={m.role === 'user'}>
-                              {m.role === 'user' ? (
-                                <UserMessage content={m.content} />
-                              ) : (
-                                <AssistantMessage content={m.content} />
-                              )}
+                          {rows.map((row) => (
+                            // Only the latest question is a scroll anchor: the scroller pins it near the
+                            // top. Older anchors would let it jump back to an earlier question.
+                            <MessageScrollerItem key={row.key} messageId={row.key} scrollAnchor={row.key === lastUserKey}>
+                              {row.node}
                             </MessageScrollerItem>
                           ))}
-                          {liveTurn && (
-                            <>
-                              <MessageScrollerItem messageId="live-user" scrollAnchor>
-                                <UserMessage content={liveTurn.content} />
-                              </MessageScrollerItem>
-                              <MessageScrollerItem messageId="live-reply">
-                                {liveTurn.reply ? <AssistantMessage content={liveTurn.reply} streaming /> : <Typing />}
-                              </MessageScrollerItem>
-                            </>
-                          )}
                         </MessageScrollerContent>
                       </MessageScrollerViewport>
                       <MessageScrollerButton className="rounded-full shadow-sm" />
