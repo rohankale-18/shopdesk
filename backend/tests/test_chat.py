@@ -5,7 +5,7 @@ import pytest
 
 from app.core.errors import UpstreamError
 from app.services import ai
-from app.services.chat import SYSTEM_PROMPT, system_prompt
+from app.services.chat import SYSTEM_PROMPT, calendar, system_prompt
 
 
 @pytest.fixture()
@@ -175,7 +175,7 @@ def test_agent_runs_the_tool_and_answers_with_its_result(client, scripted_model)
 
     # First call: the model gets the tool list. Second call: it gets its request and our result.
     first_messages, first_kwargs = calls[0]
-    assert [t["function"]["name"] for t in first_kwargs["tools"]] == ["get_store_overview"]
+    assert "get_store_overview" in [t["function"]["name"] for t in first_kwargs["tools"]]
     second_messages = calls[1][0]
     request, result = second_messages[-2:]
     assert request["role"] == "assistant"
@@ -226,7 +226,40 @@ def test_agent_stops_after_max_steps(client, scripted_model):
     assert events[-1][1]["assistant_message"]["content"] == EMPTY_REPLY
 
 
-def test_system_prompt_ends_with_todays_date():
-    prompt = system_prompt(date(2026, 11, 15))
+def test_system_prompt_ends_with_the_calendar():
+    prompt = system_prompt(date(2026, 11, 15))  # a Sunday
     assert prompt.startswith(SYSTEM_PROMPT)
-    assert prompt.endswith("Today is Sunday, 15 November 2026 (UTC).")
+    assert prompt.endswith(
+        "Today is Sunday, 15 November 2026 (UTC). Use these dates as given:"
+        "\n- This week: 2026-11-09 to 2026-11-15"
+        "\n- Last week: 2026-11-02 to 2026-11-08"
+        "\n- Week before last: 2026-10-26 to 2026-11-01"
+        "\n- This month: 2026-11-01 to 2026-11-15"
+        "\n- Last month: 2026-10-01 to 2026-10-31"
+    )
+
+
+def test_calendar_on_a_monday_in_january():
+    text = calendar(date(2027, 1, 4))  # Monday: this week is just today; last month is last year
+    assert "This week: 2027-01-04 to 2027-01-04" in text
+    assert "Last week: 2026-12-28 to 2027-01-03" in text
+    assert "Last month: 2026-12-01 to 2026-12-31" in text
+
+
+def test_two_tools_in_one_turn(client, scripted_model):
+    script, calls = scripted_model
+    sales = ai.ToolCall(
+        id="c1", name="get_sales", arguments='{"start_date": "2026-05-01", "end_date": "2026-05-31"}'
+    )
+    script += [[sales, ask_overview("c2")], ["Both answers."]]
+    cid = new_chat(client)
+    events = send(client, cid, "Revenue in May, and how many open tickets?")
+
+    tool_events = [data["label"] for name, data in events if name == "tool"]
+    assert tool_events == ["Looked up sales, 2026-05-01 to 2026-05-31", "Looked up store overview"]
+    # The model's second call gets one result per request, matched by id.
+    results = [m for m in calls[1][0] if m["role"] == "tool"]
+    assert [r["tool_call_id"] for r in results] == ["c1", "c2"]
+    assert "period" in json.loads(results[0]["content"])
+    saved = client.get(f"/api/chat/conversations/{cid}").json()["messages"][-1]["tool_calls"]
+    assert [t["label"] for t in saved] == tool_events

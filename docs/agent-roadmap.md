@@ -8,7 +8,7 @@ The support assistant learns one capability at a time. Each step adds **one new 
 |---|---|---|---|---|
 | 0 | Chat foundation | none | Streaming chat, stored conversations, system prompt | ✅ |
 | 1 | The agent loop | `get_store_overview` | Tool definitions and the tool-calling loop | ✅ |
-| 2 | Sales for any period | `get_sales` | Arguments the model works out (dates), combining tool results | ⬜ |
+| 2 | Sales for any period | `get_sales` | Arguments the model works out (dates), combining tool results | ✅ |
 | 3 | Look up by ID | `get_order` | Arguments, errors as data, output size | ⬜ |
 | 4 | Search, then chain | `find_customer`, `list_customer_orders` | Multi-step reasoning, ambiguity, limits | ⬜ |
 | 5 | Tickets | `get_ticket`, `list_tickets` | Summarizing real data, page context | ⬜ |
@@ -29,6 +29,9 @@ The support assistant learns one capability at a time. Each step adds **one new 
 - **Keep tool outputs small.** Return only the fields that matter; everything returned costs tokens.
 - **Tools do the deterministic work.** Date ranges, totals, averages and filtering happen in code. The model picks the tool and its arguments, then puts the result into words. It never does the arithmetic.
 - **Arguments as each tool needs them.** Each tool gets the arguments its questions need when it's built, not in a big pass at the end.
+- **Check overlap with existing tools.** When a new tool can answer some of the same questions as an old one, update both descriptions to say which to use, or trim the old tool.
+- **Comparisons share one pattern.** A tool that measures something over a period takes optional `compare_start_date` / `compare_end_date`, and builds `period` / `comparison` / `change` with the shared `compare()` helper in `tools.py`.
+- **Mistakes the model can fix are results, not crashes.** Raise `ToolError("...")` with a message written for the model; `tools.run()` returns it as `{"error": ...}`.
 
 ---
 
@@ -95,32 +98,41 @@ Already in place before the agent work starts.
 
 ---
 
-## Step 2: Sales for any period ⬜
+## Step 2: Sales for any period ✅
 
-**Tool:** `get_sales(start_date, end_date)`: orders placed and revenue for exactly that period, computed in code.
+**Tool:** `get_sales(start_date, end_date, compare_start_date?, compare_end_date?)`: orders placed and revenue (before refunds, cancelled orders excluded) for exactly that period, computed in code.
 
 **Why now:** Step 1 showed the gap. "Revenue in the last 10 days?" or "How did we do last week?" can't be answered from a fixed 30-day snapshot, and the model was tempted to divide and subtract.
 
 **What you learn**
-- **Arguments:** a JSON schema with two dates, and a description that says the format and what "inclusive" means.
-- **Arguments the model works out:** "last week" or "since Monday" become real dates, using today's date from the system prompt.
+- **Arguments:** a JSON schema with dates, and a description that says the format and what "inclusive" means.
+- **Arguments the model works out:** "last week" or "since Monday" become real dates.
 - **Validation in code:** bad dates, end before start or a future range go back to the model as an error result it can explain or fix. They don't crash the request.
-- **Combining tool results:** several calls in one turn (e.g. this week *and* last week to compare), or two different tools (sales plus open tickets).
-- **Who does the maths when combining:** the "no arithmetic" rule meets comparisons. The tool returns the derived figures (e.g. a previous-period comparison); the model only puts them side by side.
+- **Combining tool results:** several calls in one turn, or two different tools (sales plus open tickets).
+- **Who does the maths when combining:** the tool returns the comparison (`change`, with differences and %); the model only reports it.
 
 **Tasks**
-- [ ] `get_sales` in `app/services/tools.py`, computed in `app/services/stats.py`
-- [ ] Argument validation, with errors returned as data
-- [ ] Decide how comparisons work (a `compare_to_previous` option, or two calls), and adjust the system prompt rule
-- [ ] Tests: a valid range, a bad range, two calls in one turn
+- [x] `get_sales` in `app/services/tools.py`, computed by `sales_totals()` in `app/services/stats.py`
+- [x] Argument validation (`parse_period()`), with errors returned as data (`ToolError`)
+- [x] Comparisons: optional `compare_start_date` / `compare_end_date` plus the shared `compare()` helper, instead of a rigid `compare_to_previous` flag. Prompt rule: report the `change` the tool returns.
+- [x] Chip labels show the arguments ("Looked up sales, 2026-11-02 to 2026-11-08")
+- [x] Overlap: the overview's description points to `get_sales` for specific periods, and vice versa
+- [x] Tests: `tests/test_tools.py` (totals, comparison, every bad-argument case, labels) and two tools in one turn in `tests/test_chat.py`
 
-**Test questions**
-- "What was our revenue in the last 10 days?"
-- "How did we do last week compared to the week before?"
-- "Revenue since the 1st of this month, and how many open tickets do we have?" (two tools)
-- "Sales on 30 February" (invalid date)
+**Test questions** (tried against the real model)
+- "What was our revenue in the last 10 days?": correct dates (Nov 6–15)
+- "How did we do last week compared to the week before?": Nov 2–8 vs Oct 26–Nov 1, with `change`
+- "Revenue since the 1st of this month, and how many open tickets do we have?": both tools in one turn
+- "Sales on 30 February": declines, since the date doesn't exist
+- "How did October compare to September?": correct months, with `change`
 
 **Notes / what I learned**
+- (observed) The model is bad at calendar maths. For "last week" it picked Wed Nov 4 – Tue Nov 10, even though the tool description says weeks run Monday to Sunday. It also wrote "2024" in a table when the tool had returned 2026 dates.
+  - **Fix:** the system prompt now ends with a calendar computed in code (`calendar()` in `chat.py`), listing this week, last week, the week before last, this month and last month as exact dates.
+  - **Rule:** "Report figures **and dates** exactly as a tool returns them."
+  
+  After the fix, "last week" came out right in repeated runs. Same principle as before: the code does the deterministic work, including dates.
+- (observed) "This week so far" returned 0 orders. That's correct: the dev data was seeded up to Nov 7. Reseed to get recent orders. Sometimes the data is the explanation, not the agent.
 -
 
 ---

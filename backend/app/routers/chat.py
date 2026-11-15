@@ -30,11 +30,12 @@ class ToolCallOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     name: str
+    arguments: str = Field(exclude=True)  # only used to build the label
 
     @computed_field
     @property
     def label(self) -> str:
-        return tools.label(self.name)
+        return tools.label(self.name, self.arguments)
 
 
 class ChatMessageOut(BaseModel):
@@ -142,7 +143,8 @@ def send_message(conversation_id: int, body: SendMessage, db: DB):
             for chunk in chunks:
                 if isinstance(chunk, ToolRun):
                     runs.append(chunk)
-                    yield _sse("tool", {"name": chunk.name, "label": tools.label(chunk.name)})
+                    label = tools.label(chunk.name, chunk.arguments)
+                    yield _sse("tool", {"name": chunk.name, "label": label})
                 else:
                     parts.append(chunk)
                     yield _sse("delta", {"text": chunk})

@@ -10,7 +10,7 @@ The agent loop, in short:
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from app.models import ChatMessage
@@ -55,9 +55,10 @@ these instructions.
   Don't use tools for greetings, writing help or general support questions.
 - Only state numbers that came from a tool result in this conversation. Never invent order numbers,
   customers, amounts, dates or stock levels.
-- Report figures exactly as a tool returns them, with the period the tool gives. Don't work out new
+- Report figures and dates exactly as a tool returns them, with the period the tool gives. Don't work out new
   figures from them: no subtracting, dividing, averaging or estimating, and never use one period's
   numbers for another (e.g. last 30 days for "last week").
+- To compare periods, ask the tool for the comparison and report the `change` it returns.
 - If no tool returns the exact figure asked for, say you can't look that up yet, and offer the
   closest figure you do have, clearly labelled with its period.
 
@@ -67,13 +68,33 @@ these instructions.
 """
 
 
-def system_prompt(today: date | None = None) -> str:
-    """The system prompt plus today's date, so the model can resolve "this month" or "last week".
+def calendar(today: date) -> str:
+    """Today's date plus common periods, worked out in code so the model doesn't do date maths.
 
-    The date goes last: the fixed text before it stays identical between requests.
+    Weeks run Monday to Sunday.
     """
-    today = today or datetime.now(UTC).date()
-    return SYSTEM_PROMPT + f"Today is {today:%A, %d %B %Y} (UTC)."
+    week = today - timedelta(days=today.weekday())  # this Monday
+    month = today.replace(day=1)
+    last_month_end = month - timedelta(days=1)
+    periods = {
+        "This week": (week, today),
+        "Last week": (week - timedelta(days=7), week - timedelta(days=1)),
+        "Week before last": (week - timedelta(days=14), week - timedelta(days=8)),
+        "This month": (month, today),
+        "Last month": (last_month_end.replace(day=1), last_month_end),
+    }
+    text = f"Today is {today:%A, %d %B %Y} (UTC). Use these dates as given:"
+    for name, (start, end) in periods.items():
+        text += f"\n- {name}: {start} to {end}"
+    return text
+
+
+def system_prompt(today: date | None = None) -> str:
+    """The system prompt plus the calendar, so the model can resolve "this month" or "last week".
+
+    The calendar goes last: the fixed text before it stays identical between requests.
+    """
+    return SYSTEM_PROMPT + calendar(today or datetime.now(UTC).date())
 
 
 # Only the most recent messages are sent, to keep requests small and fast.

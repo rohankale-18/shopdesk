@@ -1,6 +1,6 @@
 """Store-wide numbers: used by the dashboard and by the assistant's tools."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -62,3 +62,18 @@ def store_overview(db: Session) -> StatsOverview:
         ],
         low_stock_products=[ProductOut.model_validate(p) for p in low_stock],
     )
+
+
+def sales_totals(db: Session, start: date, end: date) -> tuple[int, int]:
+    """Orders placed and revenue (cents, before refunds) from `start` to `end`, both inclusive (UTC).
+
+    Cancelled orders don't count, the same rule as the dashboard's revenue chart.
+    """
+    since = datetime.combine(start, time.min, tzinfo=UTC)
+    until = datetime.combine(end + timedelta(days=1), time.min, tzinfo=UTC)
+    orders, revenue = db.execute(
+        select(func.count(), func.coalesce(func.sum(Order.total_cents), 0)).where(
+            Order.placed_at >= since, Order.placed_at < until, Order.status != OrderStatus.cancelled
+        )
+    ).one()
+    return orders, revenue
