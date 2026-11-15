@@ -19,6 +19,7 @@ import type {
   SeedRequest,
   SeedResult,
   SendMessageResult,
+  ToolUse,
   StatsOverview,
   Ticket,
   TicketMessage,
@@ -220,7 +221,13 @@ export function useSendChatMessage() {
   return async (
     id: number,
     content: string,
-    opts: { onDelta: (text: string) => void; signal?: AbortSignal },
+    opts: {
+      onDelta: (text: string) => void
+      onTool?: (tool: ToolUse) => void
+      /** Called with the saved messages just before they are added to the cache. */
+      onSaved?: (result: SendMessageResult) => void
+      signal?: AbortSignal
+    },
   ): Promise<SendMessageResult> => {
     let result = null as SendMessageResult | null
     await api.stream(
@@ -228,6 +235,7 @@ export function useSendChatMessage() {
       { content },
       (event, data) => {
         if (event === 'delta') opts.onDelta((data as { text: string }).text)
+        else if (event === 'tool') opts.onTool?.(data as ToolUse)
         else if (event === 'done') result = data as SendMessageResult
         else if (event === 'error') {
           const { code, message } = data as { code: string; message: string }
@@ -240,6 +248,7 @@ export function useSendChatMessage() {
 
     // The backend saved both messages. Show them right away, then refetch in the
     // background to pick up server-side changes (the first message sets the title).
+    opts.onSaved?.(result)
     const { user_message, assistant_message } = result
     qc.setQueryData<Conversation>(chatKeys.conversation(id), (old) =>
       old ? { ...old, messages: [...old.messages, user_message, assistant_message] } : old,

@@ -65,8 +65,12 @@ export function Composer({
           <span className="hidden text-[12px] font-normal text-faint sm:inline">
             Enter to send · Shift+Enter for a new line
           </span>
+          {/* Separate keys: Stop and Send must be different <button>s. Stopping puts the text back
+              and swaps Stop for Send within the same click; if React reused the element, the
+              browser would finish that click on a submit button and re-send the message. */}
           {busy ? (
             <InputGroupButton
+              key="stop"
               variant="default"
               size="icon-sm"
               className="ml-auto size-9 rounded-full"
@@ -78,6 +82,7 @@ export function Composer({
             </InputGroupButton>
           ) : (
             <InputGroupButton
+              key="send"
               type="submit"
               variant="default"
               size="icon-sm"

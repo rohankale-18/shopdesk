@@ -8,14 +8,15 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError, NotFoundError
 from app.db import SessionLocal, get_db
-from app.models import ChatConversation, ChatMessage, ChatRole, utcnow
-from app.services.chat import EMPTY_REPLY, stream_reply
+from app.models import ChatConversation, ChatMessage, ChatRole, ChatToolCall, utcnow
+from app.services import tools
+from app.services.chat import EMPTY_REPLY, ToolRun, stream_reply
 
 logger = logging.getLogger("shopdesk.chat")
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -25,12 +26,24 @@ DB = Annotated[Session, Depends(get_db)]
 # ---------- schemas ----------
 
 
+class ToolCallOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    name: str
+
+    @computed_field
+    @property
+    def label(self) -> str:
+        return tools.label(self.name)
+
+
 class ChatMessageOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     role: ChatRole
     content: str
+    tool_calls: list[ToolCallOut]
     created_at: datetime
 
 
@@ -107,6 +120,7 @@ def send_message(conversation_id: int, body: SendMessage, db: DB):
     """Send a message; the assistant's reply streams back as Server-Sent Events.
 
     - `delta`: `{"text": "..."}`, the next piece of the reply.
+    - `tool`: `{"name": "...", "label": "..."}`, the assistant ran a tool (it may run several).
     - `done`: `{"user_message": ..., "assistant_message": ...}`, both saved. Always last on success.
     - `error`: `{"code": "...", "message": "..."}` if it fails mid-stream. Nothing is saved.
 
@@ -123,10 +137,15 @@ def send_message(conversation_id: int, body: SendMessage, db: DB):
 
     def events() -> Iterator[str]:
         parts: list[str] = []
+        runs: list[ToolRun] = []
         try:
             for chunk in chunks:
-                parts.append(chunk)
-                yield _sse("delta", {"text": chunk})
+                if isinstance(chunk, ToolRun):
+                    runs.append(chunk)
+                    yield _sse("tool", {"name": chunk.name, "label": tools.label(chunk.name)})
+                else:
+                    parts.append(chunk)
+                    yield _sse("delta", {"text": chunk})
         except AppError as e:
             yield _sse("error", {"code": e.code, "message": e.message})
             return
@@ -147,6 +166,9 @@ def send_message(conversation_id: int, body: SendMessage, db: DB):
             user_msg = ChatMessage(role=ChatRole.user, content=text)
             reply = "".join(parts).strip() or EMPTY_REPLY
             assistant_msg = ChatMessage(role=ChatRole.assistant, content=reply)
+            assistant_msg.tool_calls = [
+                ChatToolCall(name=r.name, arguments=r.arguments, result=json.dumps(r.result)) for r in runs
+            ]
             convo.messages.extend([user_msg, assistant_msg])
             convo.updated_at = utcnow()  # adding messages doesn't touch the conversation row itself
             session.commit()

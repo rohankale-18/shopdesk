@@ -1,10 +1,11 @@
 import json
+from datetime import date
 
 import pytest
 
 from app.core.errors import UpstreamError
 from app.services import ai
-from app.services.chat import SYSTEM_PROMPT
+from app.services.chat import SYSTEM_PROMPT, system_prompt
 
 
 @pytest.fixture()
@@ -69,7 +70,7 @@ def test_model_gets_system_prompt_and_history(client, fake_model):
     send(client, cid, "second")
 
     assert fake_model[1] == [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt()},
         {"role": "user", "content": "first"},
         {"role": "assistant", "content": "reply 1"},
         {"role": "user", "content": "second"},
@@ -137,3 +138,95 @@ def test_reply_uses_plain_spaces_and_hyphens(client, monkeypatch):
     events = send(client, cid, "hi")
     assert events[0] == ("delta", {"text": "Numbers 1 to 20 for ORD-00000002"})
     assert events[-1][1]["assistant_message"]["content"] == "Numbers 1 to 20 for ORD-00000002"
+
+
+# ---------- the agent loop (tools) ----------
+
+
+@pytest.fixture()
+def scripted_model(monkeypatch):
+    """A fake model that plays back a script: one list of pieces (text or ToolCall) per call.
+
+    Returns the recorded calls as (messages, kwargs) pairs.
+    """
+    calls: list[tuple[list[dict], dict]] = []
+    script: list[list] = []
+
+    def stream(messages, **kwargs):
+        calls.append((list(messages), kwargs))  # copy: the loop keeps appending to the list
+        return iter(script[min(len(calls), len(script)) - 1])
+
+    monkeypatch.setattr(ai, "stream", stream)
+    return script, calls
+
+
+def ask_overview(call_id="call_1"):
+    return ai.ToolCall(id=call_id, name="get_store_overview", arguments="{}")
+
+
+def test_agent_runs_the_tool_and_answers_with_its_result(client, scripted_model):
+    script, calls = scripted_model
+    script += [[ask_overview()], ["There are ", "N open tickets."]]
+    cid = new_chat(client)
+    events = send(client, cid, "How many open tickets are there?")
+
+    assert [name for name, _ in events] == ["tool", "delta", "delta", "done"]
+    assert events[0][1] == {"name": "get_store_overview", "label": "Looked up store overview"}
+
+    # First call: the model gets the tool list. Second call: it gets its request and our result.
+    first_messages, first_kwargs = calls[0]
+    assert [t["function"]["name"] for t in first_kwargs["tools"]] == ["get_store_overview"]
+    second_messages = calls[1][0]
+    request, result = second_messages[-2:]
+    assert request["role"] == "assistant"
+    assert request["tool_calls"][0]["function"]["name"] == "get_store_overview"
+    assert result["role"] == "tool" and result["tool_call_id"] == "call_1"
+    dashboard = client.get("/api/stats/overview").json()
+    assert json.loads(result["content"])["tickets_now"]["open_tickets"] == dashboard["open_tickets"]
+
+    # The tool call is saved with the reply, so the chip survives a reload.
+    reply = client.get(f"/api/chat/conversations/{cid}").json()["messages"][-1]
+    assert reply["content"] == "There are N open tickets."
+    assert reply["tool_calls"] == [{"name": "get_store_overview", "label": "Looked up store overview"}]
+
+
+def test_agent_answers_without_tools_when_none_needed(client, scripted_model):
+    script, calls = scripted_model
+    script += [["Hi! How can I help?"]]
+    cid = new_chat(client)
+    events = send(client, cid, "Hi!")
+
+    assert [name for name, _ in events] == ["delta", "done"]
+    assert len(calls) == 1
+    assert events[-1][1]["assistant_message"]["tool_calls"] == []
+
+
+def test_unknown_tool_goes_back_to_the_model_as_an_error(client, scripted_model):
+    script, calls = scripted_model
+    script += [[ai.ToolCall(id="c1", name="delete_everything", arguments="{}")], ["I can't do that."]]
+    cid = new_chat(client)
+    events = send(client, cid, "Delete everything")
+
+    assert events[-1][0] == "done"
+    tool_result = json.loads(calls[1][0][-1]["content"])
+    assert "error" in tool_result
+
+
+def test_agent_stops_after_max_steps(client, scripted_model):
+    from app.services.chat import EMPTY_REPLY, MAX_STEPS
+
+    script, calls = scripted_model
+    script += [[ask_overview()]]  # a model that never stops asking
+    cid = new_chat(client)
+    events = send(client, cid, "Loop forever")
+
+    assert len(calls) == MAX_STEPS
+    assert calls[-1][1]["tool_choice"] == "none"  # the last call must answer
+    assert [name for name, _ in events].count("tool") == MAX_STEPS - 1
+    assert events[-1][1]["assistant_message"]["content"] == EMPTY_REPLY
+
+
+def test_system_prompt_ends_with_todays_date():
+    prompt = system_prompt(date(2026, 11, 15))
+    assert prompt.startswith(SYSTEM_PROMPT)
+    assert prompt.endswith("Today is Sunday, 15 November 2026 (UTC).")

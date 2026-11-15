@@ -72,10 +72,10 @@ function MessageScrollerItem({
     <MessageScrollerPrimitive.Item
       data-slot="message-scroller-item"
       scrollAnchor={scrollAnchor}
-      className={cn(
-        "min-w-0 shrink-0 [contain-intrinsic-size:auto_10rem] [content-visibility:auto]",
-        className
-      )}
+      // ShopDesk: no `content-visibility: auto` + `contain-intrinsic-size: auto 10rem` here.
+      // Rows whose content just changed were briefly laid out at the 10rem placeholder height
+      // (e.g. 150px for a 26px "typing" row), which made the chat jump while replies streamed.
+      className={cn("min-w-0 shrink-0", className)}
       {...props}
     />
   )

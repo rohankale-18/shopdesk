@@ -7,25 +7,28 @@ The support assistant learns one capability at a time. Each step adds **one new 
 | # | Step | Tools | New idea | Status |
 |---|---|---|---|---|
 | 0 | Chat foundation | none | Streaming chat, stored conversations, system prompt | ✅ |
-| 1 | The agent loop | `get_store_overview` | Tool definitions and the tool-calling loop | ⬜ |
-| 2 | Look up by ID | `get_order` | Arguments, errors as data, output size | ⬜ |
-| 3 | Search, then chain | `find_customer`, `list_customer_orders` | Multi-step reasoning, ambiguity, limits | ⬜ |
-| 4 | Tickets | `get_ticket`, `list_tickets` | Summarizing real data, page context | ⬜ |
-| 5 | Products and stock | `search_products` | Grounding: never invent facts | ⬜ |
-| 6 | Analytics and charts | `sales_by_day`, `top_products` | Structured output rendered as charts | ⬜ |
-| 7 | Actions with approval | `draft_ticket_reply`, `create_refund`, `cancel_order` | Human in the loop, backend-enforced rules | ⬜ |
-| 8 | Evals | none | Measuring whether a change made the agent better | ⬜ |
+| 1 | The agent loop | `get_store_overview` | Tool definitions and the tool-calling loop | ✅ |
+| 2 | Sales for any period | `get_sales` | Arguments the model works out (dates), combining tool results | ⬜ |
+| 3 | Look up by ID | `get_order` | Arguments, errors as data, output size | ⬜ |
+| 4 | Search, then chain | `find_customer`, `list_customer_orders` | Multi-step reasoning, ambiguity, limits | ⬜ |
+| 5 | Tickets | `get_ticket`, `list_tickets` | Summarizing real data, page context | ⬜ |
+| 6 | Products and stock | `search_products` | Grounding: never invent facts | ⬜ |
+| 7 | Analytics and charts | `sales_by_day`, `top_products` | Structured output rendered as charts | ⬜ |
+| 8 | Actions with approval | `draft_ticket_reply`, `create_refund`, `cancel_order` | Human in the loop, backend-enforced rules | ⬜ |
+| 9 | Evals | none | Measuring whether a change made the agent better | ⬜ |
 
 ---
 
 ## Principles (apply to every step)
 
 - **Tools call the service layer directly** (`app/services/...`), not ShopDesk's own HTTP API. They share the same validation and business rules.
-- **Read-only before write.** No tool changes data until Step 7, and then only with human approval.
+- **Read-only before write.** No tool changes data until Step 8, and then only with human approval.
 - **One step at a time.** Add the tool, try the test questions, note what happened, then move on.
 - **Rules live in the backend.** The model's judgement is never the safety net; the code enforces limits (e.g. refund amounts).
 - **Log every tool call and its result.** When the agent does something odd, the log tells you why.
 - **Keep tool outputs small.** Return only the fields that matter; everything returned costs tokens.
+- **Tools do the deterministic work.** Date ranges, totals, averages and filtering happen in code. The model picks the tool and its arguments, then puts the result into words. It never does the arithmetic.
+- **Arguments as each tool needs them.** Each tool gets the arguments its questions need when it's built, not in a big pass at the end.
 
 ---
 
@@ -43,7 +46,7 @@ Already in place before the agent work starts.
 
 ---
 
-## Step 1: The agent loop ⬜
+## Step 1: The agent loop ✅
 
 **Tool:** `get_store_overview()`: revenue, order counts, open tickets. No arguments. The numbers match the dashboard, so answers are easy to check by eye.
 
@@ -55,24 +58,74 @@ Already in place before the agent work starts.
 - **Design decision:** are tool calls saved with the conversation, so follow-up questions can use them?
 
 **Tasks**
-- [ ] Tool registry: tool definitions plus the Python functions they call
-- [ ] Agent loop in `app/services/chat.py`, with a maximum number of steps
-- [ ] Stream tool activity to the UI (a new SSE event)
-- [ ] Show a tool-use chip in the chat
-- [ ] Decide how tool calls are stored, and update the system prompt
-- [ ] Tests with a fake model that asks for the tool
+- [x] Tool registry: tool definitions plus the Python functions they call (`app/services/tools.py`)
+- [x] Agent loop in `app/services/chat.py`, with a maximum number of steps (`MAX_STEPS = 5`)
+- [x] Stream tool activity to the UI (a new SSE event: `tool`)
+- [x] Show a tool-use chip in the chat
+- [x] Decide how tool calls are stored, and update the system prompt
+- [x] Tests with a fake model that asks for the tool (`tests/test_chat.py`, "the agent loop" section)
+
+**How it fits together**
+1. `services/ai.py` `stream()` now takes `tools`. It yields text as it arrives, and a `ToolCall` for each tool the model asks for (assembled from pieces, at the end of the stream).
+2. `services/chat.py` `_agent_loop()`: if the model asked for tools, it adds the request and each result to the messages, then calls the model again. The last allowed call uses `tool_choice="none"`, so the model has to answer.
+3. `services/tools.py`: each `Tool` has a name, a label for the UI, a description and a JSON schema (what the model sees), plus `run` (what we execute). `run()` never raises: errors go back to the model as `{"error": ...}`.
+4. `routers/chat.py` sends a `tool` event for each run and saves the runs with the reply.
+5. The dashboard numbers moved to `services/stats.py`, so the dashboard and the tool share the same code.
+
+**Decisions made**
+- **Storage:** each tool run is saved in a new `chat_tool_calls` table (name, arguments, result), linked to the assistant message. It drives the chips after a reload and works as a log.
+- **History:** tool results are *not* replayed in later turns, only the text of past answers. Store data changes, so the model should look it up again rather than trust an old result.
+- **System prompt:** the "no data access" rule became "use tools for real data; only state numbers that came from a tool; say so if no tool can answer".
+
+**Test questions** (tried against the real model)
+- "How are we doing this month?": calls the tool, answers with a table
+- "How many open tickets are there?": calls the tool
+- "Hi!": answers without a tool
+- "What's the status of ORD-00000002?": no tool for this yet, so it says it can't look it up
+
+**Notes / what I learned**
+- (observed) The first version returned flat keys like `revenue_usd` and `open_tickets`. The model reported 30-day revenue as "after refunds", put all-time order counts under "this month", and misread the ticket numbers. Grouping the output by period with explicit names (`all_time`, `last_30_days.revenue_before_refunds_usd`, `tickets_now.open_or_pending`) fixed all three. Tool output is part of the prompt.
+- (observed) "Open tickets": the app's badge counts open + pending (2,551), but the model reported status `open` only (1,781). Fixed in the tool, not the system prompt: the field is now `tickets_now.open_tickets`, and the description defines it as "open or pending, the same number as the Tickets badge". What a field means belongs with the tool. If several tools share the term later (Step 5), move it into a glossary in the system prompt.
+- (observed) A fixed tool tempts the model to do arithmetic. Asked "How did we do last week?", it took the 30-day numbers, divided by 3 and subtracted all-time refunds from 30-day revenue. Two fixes:
+  - Today's date in the system prompt (`system_prompt()`, added last so the fixed text stays identical between requests).
+  - A rule to report figures exactly as returned, never derive new ones, and say so when no tool has the exact period.
+  
+  Now it says it has no weekly figure and offers the labelled 30-day one. The real fix is a tool with date arguments (`get_sales(start_date, end_date)`, Step 2).
+-
+
+---
+
+## Step 2: Sales for any period ⬜
+
+**Tool:** `get_sales(start_date, end_date)`: orders placed and revenue for exactly that period, computed in code.
+
+**Why now:** Step 1 showed the gap. "Revenue in the last 10 days?" or "How did we do last week?" can't be answered from a fixed 30-day snapshot, and the model was tempted to divide and subtract.
+
+**What you learn**
+- **Arguments:** a JSON schema with two dates, and a description that says the format and what "inclusive" means.
+- **Arguments the model works out:** "last week" or "since Monday" become real dates, using today's date from the system prompt.
+- **Validation in code:** bad dates, end before start or a future range go back to the model as an error result it can explain or fix. They don't crash the request.
+- **Combining tool results:** several calls in one turn (e.g. this week *and* last week to compare), or two different tools (sales plus open tickets).
+- **Who does the maths when combining:** the "no arithmetic" rule meets comparisons. The tool returns the derived figures (e.g. a previous-period comparison); the model only puts them side by side.
+
+**Tasks**
+- [ ] `get_sales` in `app/services/tools.py`, computed in `app/services/stats.py`
+- [ ] Argument validation, with errors returned as data
+- [ ] Decide how comparisons work (a `compare_to_previous` option, or two calls), and adjust the system prompt rule
+- [ ] Tests: a valid range, a bad range, two calls in one turn
 
 **Test questions**
-- "How are we doing this month?"
-- "How many open tickets are there?"
-- "Hi!" (should answer without calling a tool)
+- "What was our revenue in the last 10 days?"
+- "How did we do last week compared to the week before?"
+- "Revenue since the 1st of this month, and how many open tickets do we have?" (two tools)
+- "Sales on 30 February" (invalid date)
 
 **Notes / what I learned**
 -
 
 ---
 
-## Step 2: Look up by ID ⬜
+## Step 3: Look up by ID ⬜
 
 **Tool:** `get_order(order_number)`
 
@@ -96,7 +149,7 @@ Already in place before the agent work starts.
 
 ---
 
-## Step 3: Search, then chain ⬜
+## Step 4: Search, then chain ⬜
 
 **Tools:** `find_customer(query)`, `list_customer_orders(customer_id)`
 
@@ -120,7 +173,7 @@ Already in place before the agent work starts.
 
 ---
 
-## Step 4: Tickets ⬜
+## Step 5: Tickets ⬜
 
 **Tools:** `get_ticket(id)`, `list_tickets(status, priority)`
 
@@ -143,7 +196,7 @@ Already in place before the agent work starts.
 
 ---
 
-## Step 5: Products and stock ⬜
+## Step 6: Products and stock ⬜
 
 **Tool:** `search_products(query)`
 
@@ -163,7 +216,7 @@ Already in place before the agent work starts.
 
 ---
 
-## Step 6: Analytics and charts ⬜
+## Step 7: Analytics and charts ⬜
 
 **Tools:** `sales_by_day`, `top_products` (or similar), returning rows of data
 
@@ -184,7 +237,7 @@ Already in place before the agent work starts.
 
 ---
 
-## Step 7: Actions with approval ⬜
+## Step 8: Actions with approval ⬜
 
 **Tools, in this order:** `draft_ticket_reply` (low risk, only fills a draft), then `create_refund`, `cancel_order`
 
@@ -209,7 +262,7 @@ Already in place before the agent work starts.
 
 ---
 
-## Step 8: Evals ⬜
+## Step 9: Evals ⬜
 
 **What you learn:** how to know whether a prompt or tool change made the agent better or worse.
 
