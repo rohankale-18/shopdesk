@@ -12,11 +12,13 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.errors import AppError, NotFoundError
 from app.db import SessionLocal, get_db
-from app.models import ChatConversation, ChatMessage, ChatRole, ChatToolCall, utcnow
-from app.services import tools
+from app.models import ChatConversation, ChatMessage, ChatRole, utcnow
+from app.services import tools, tracing
 from app.services.chat import EMPTY_REPLY, ToolRun, stream_reply
+from app.services.tracing import TraceRecorder
 
 logger = logging.getLogger("shopdesk.chat")
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -45,6 +47,7 @@ class ChatMessageOut(BaseModel):
     role: ChatRole
     content: str
     tool_calls: list[ToolCallOut]
+    trace_id: int | None  # the reply's trace (assistant messages only)
     created_at: datetime
 
 
@@ -126,36 +129,48 @@ def send_message(conversation_id: int, body: SendMessage, db: DB):
     - `error`: `{"code": "...", "message": "..."}` if it fails mid-stream. Nothing is saved.
 
     Problems found before streaming starts (unknown conversation, no API key...) return a
-    normal JSON error instead. If the client disconnects early, nothing is saved.
+    normal JSON error instead. If the client disconnects early, no messages are saved.
+    A trace of the reply is saved in every case (see /api/traces).
     """
     convo = _get(db, conversation_id)
     text = body.content.strip()
     is_first = not convo.messages
 
     # Starts the model call now, so setup errors still become normal error responses.
-    chunks = stream_reply(convo.messages, text)
+    trace = TraceRecorder(question=text, model=get_settings().ai_model)
+    chunks = stream_reply(convo.messages, text, trace)
     db.close()  # the stream below can take a while; it saves with its own session
+
+    def save_trace_only() -> None:
+        with SessionLocal() as session:
+            if tracing.save(session, trace, conversation_id):
+                session.commit()
 
     def events() -> Iterator[str]:
         parts: list[str] = []
-        runs: list[ToolRun] = []
         try:
             for chunk in chunks:
                 if isinstance(chunk, ToolRun):
-                    runs.append(chunk)
                     label = tools.label(chunk.name, chunk.arguments)
                     yield _sse("tool", {"name": chunk.name, "label": label})
                 else:
                     parts.append(chunk)
                     yield _sse("delta", {"text": chunk})
         except AppError as e:
+            trace.fail(e.message)
+            save_trace_only()
             yield _sse("error", {"code": e.code, "message": e.message})
             return
-        except Exception:
+        except Exception as e:
             logger.exception("Chat stream failed for conversation %s", conversation_id)
+            trace.fail(f"{type(e).__name__}: {e}")
+            save_trace_only()
             message = "Something went wrong. Please try again."
             yield _sse("error", {"code": "internal_error", "message": message})
             return
+        except GeneratorExit:  # the client went away (Stop button): keep the trace, as "stopped"
+            save_trace_only()
+            raise
 
         # Save the finished turn. Nothing is written while the model is still talking.
         with SessionLocal() as session:
@@ -168,11 +183,10 @@ def send_message(conversation_id: int, body: SendMessage, db: DB):
             user_msg = ChatMessage(role=ChatRole.user, content=text)
             reply = "".join(parts).strip() or EMPTY_REPLY
             assistant_msg = ChatMessage(role=ChatRole.assistant, content=reply)
-            assistant_msg.tool_calls = [
-                ChatToolCall(name=r.name, arguments=r.arguments, result=json.dumps(r.result)) for r in runs
-            ]
             convo.messages.extend([user_msg, assistant_msg])
             convo.updated_at = utcnow()  # adding messages doesn't touch the conversation row itself
+            trace.finish()
+            tracing.save(session, trace, conversation_id, assistant_msg)
             session.commit()
             result = SendMessageResult(user_message=user_msg, assistant_message=assistant_msg)
         yield _sse("done", result.model_dump(mode="json"))

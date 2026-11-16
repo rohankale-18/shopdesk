@@ -4,17 +4,21 @@ The agent loop, in short:
 1. Send the conversation plus the list of tools to the model.
 2. The model either answers (done), or asks for one or more tools.
 3. We run the tools and append their results to the conversation, then go back to 1.
-`MAX_STEPS` stops a confused model from looping forever.
+`MAX_STEPS` stops a confused model from looping forever. Each pass is recorded on a
+`TraceRecorder` (see tracing.py), so the Traces page can show what happened and why.
 """
 
 import json
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+from app.core.config import get_settings
 from app.models import ChatMessage
 from app.services import ai, tools
+from app.services.tracing import ModelCallRecord, TraceRecorder
 
 SYSTEM_PROMPT = """\
 You are ShopDesk Assistant, an AI helper for the customer-support team of a small online store.
@@ -120,32 +124,45 @@ class ToolRun:
     result: dict[str, Any]
 
 
-def stream_reply(history: list[ChatMessage], user_message: str) -> Iterator[str | ToolRun]:
+def stream_reply(
+    history: list[ChatMessage], user_message: str, trace: TraceRecorder | None = None
+) -> Iterator[str | ToolRun]:
     """Start the agent on the assistant's next message.
 
     Returns an iterator over the reply: text pieces (`str`) and the tools it ran (`ToolRun`).
-    `history` excludes `user_message`. Setup errors (e.g. no API key) raise immediately.
+    Every model call and tool run is recorded on `trace`. `history` excludes `user_message`.
+    Setup errors (e.g. no API key) raise immediately.
     """
+    trace = trace or TraceRecorder(question=user_message, model=get_settings().ai_model)
     messages: list[ai.Message] = [{"role": "system", "content": system_prompt()}]
     # Past turns are replayed as plain text. Their tool results are not: the answers already
     # say what mattered, and store data changes, so the model should look it up again.
     messages += [{"role": m.role.value, "content": m.content} for m in history[-HISTORY_LIMIT:]]
     messages.append({"role": "user", "content": user_message})
 
-    first = ai.stream(messages, tools=tools.definitions())  # sent now, so setup errors raise here
-    return _agent_loop(messages, first)
+    definitions = tools.definitions()
+    call = trace.model_call(1, messages, definitions, "auto")
+    first = ai.stream(messages, tools=definitions)  # sent now, so setup errors raise here
+    return _agent_loop(messages, first, trace, call)
 
 
-def _agent_loop(messages: list[ai.Message], response: Iterator[str | ai.ToolCall]) -> Iterator[str | ToolRun]:
+def _agent_loop(
+    messages: list[ai.Message],
+    response: Iterator[str | ai.ToolCall | ai.StreamEnd],
+    trace: TraceRecorder,
+    call: ModelCallRecord,
+) -> Iterator[str | ToolRun]:
     for step in range(1, MAX_STEPS + 1):
         text: list[str] = []
         calls: list[ai.ToolCall] = []
         for piece in response:
-            if isinstance(piece, ai.ToolCall):
-                calls.append(piece)
-            else:
+            if isinstance(piece, str):
+                piece = piece.translate(_PLAIN)
                 text.append(piece)
-                yield piece.translate(_PLAIN)
+                yield piece
+            elif isinstance(piece, ai.ToolCall):
+                calls.append(piece)
+            trace.on_piece(call, piece)  # timings, tokens, reasoning (StreamEnd)
 
         if not calls or step == MAX_STEPS:  # the model answered (or ran out of steps): done
             return
@@ -153,11 +170,15 @@ def _agent_loop(messages: list[ai.Message], response: Iterator[str | ai.ToolCall
         # The model asked for tools. Record its request, run each tool, add the results...
         requested = [c.as_message_part() for c in calls]
         messages.append({"role": "assistant", "content": "".join(text), "tool_calls": requested})
-        for call in calls:
-            result = tools.run(call.name, call.arguments)
-            yield ToolRun(call.name, call.arguments, result)
-            messages.append({"role": "tool", "tool_call_id": call.id, "content": json.dumps(result)})
+        for tool_call in calls:
+            started = time.perf_counter()
+            result = tools.run(tool_call.name, tool_call.arguments)
+            trace.tool_run(step, tool_call.name, tool_call.arguments, result, started)
+            yield ToolRun(tool_call.name, tool_call.arguments, result)
+            messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": json.dumps(result)})
 
         # ...and ask again. On the last step, tools are switched off so it has to answer.
-        last = step + 1 == MAX_STEPS
-        response = ai.stream(messages, tools=tools.definitions(), tool_choice="none" if last else "auto")
+        tool_choice = "none" if step + 1 == MAX_STEPS else "auto"
+        definitions = tools.definitions()
+        call = trace.model_call(step + 1, messages, definitions, tool_choice)
+        response = ai.stream(messages, tools=definitions, tool_choice=tool_choice)

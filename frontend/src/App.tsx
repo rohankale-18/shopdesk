@@ -15,6 +15,7 @@ import { Tickets } from './pages/Tickets'
 
 // Lazy: the chat UI (Base UI, message scroller, Markdown) loads only when the page is opened.
 const Assistant = lazy(() => import('./pages/Assistant'))
+const Traces = lazy(() => import('./pages/Traces'))
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -57,6 +58,14 @@ export default function App() {
               element={
                 <Suspense fallback={null}>
                   <Assistant />
+                </Suspense>
+              }
+            />
+            <Route
+              path="traces/:id?"
+              element={
+                <Suspense fallback={null}>
+                  <Traces />
                 </Suspense>
               }
             />

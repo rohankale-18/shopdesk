@@ -118,7 +118,7 @@ export default function Assistant() {
       m.role === 'user' ? (
         <UserMessage content={m.content} />
       ) : (
-        <AssistantMessage content={m.content} tools={m.tool_calls} />
+        <AssistantMessage content={m.content} tools={m.tool_calls} traceId={m.trace_id} />
       ),
   }))
   if (liveTurn) {

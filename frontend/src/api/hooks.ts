@@ -25,6 +25,8 @@ import type {
   TicketMessage,
   TicketSummary,
   TicketUpdate,
+  TraceDetail,
+  TraceSummary,
 } from './types'
 
 type Params = Record<string, string | number | boolean | (string | number)[] | null | undefined>
@@ -254,6 +256,19 @@ export function useSendChatMessage() {
       old ? { ...old, messages: [...old.messages, user_message, assistant_message] } : old,
     )
     void qc.invalidateQueries({ queryKey: ['chat'] }) // the list and this conversation
+    void qc.invalidateQueries({ queryKey: ['traces', 'list'] })
     return result
   }
 }
+
+// ---------- traces ----------
+
+export const useTraces = () =>
+  useQuery({ queryKey: ['traces', 'list'], queryFn: () => api.get<TraceSummary[]>('/api/traces', { limit: 100 }) })
+
+export const useTrace = (id: number) =>
+  useQuery({
+    queryKey: ['traces', id],
+    queryFn: () => api.get<TraceDetail>(`/api/traces/${id}`),
+    staleTime: Infinity, // a saved trace never changes
+  })

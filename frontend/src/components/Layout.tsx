@@ -14,6 +14,7 @@ const NAV = [
   { to: '/customers', label: 'Customers' },
   { to: '/products', label: 'Products' },
   { to: '/assistant', label: 'Assistant' },
+  { to: '/traces', label: 'Traces' },
   { to: '/data', label: 'Test data', mobileOnly: true },
 ]
 

@@ -224,7 +224,67 @@ export interface ChatMessage {
   role: ChatRole
   content: string
   tool_calls: ToolUse[]
+  /** The reply's trace (assistant messages only). */
+  trace_id: number | null
   created_at: string
+}
+
+// ---------- traces (what happened behind each assistant reply) ----------
+
+export type TraceStatus = 'ok' | 'error' | 'stopped'
+
+/** A message exactly as it was sent to the model. */
+export interface PromptMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool'
+  content: string | null
+  tool_calls?: { id: string; function: { name: string; arguments: string } }[]
+  tool_call_id?: string
+}
+
+export interface ModelCall {
+  step: number
+  request: { messages: PromptMessage[]; tools: string[]; tool_choice: string }
+  response_text: string
+  reasoning: string
+  tool_calls: { name: string; arguments: string }[]
+  finish_reason: string | null
+  prompt_tokens: number
+  completion_tokens: number
+  reasoning_tokens: number
+  duration_ms: number
+  first_token_ms: number | null
+}
+
+export interface ToolRun {
+  step: number
+  name: string
+  arguments: string
+  result: unknown
+  is_error: boolean
+  duration_ms: number
+}
+
+export interface TraceSummary {
+  id: number
+  conversation_id: number
+  message_id: number | null
+  question: string
+  model: string
+  status: TraceStatus
+  error: string | null
+  started_at: string
+  duration_ms: number
+  first_token_ms: number | null
+  steps: number
+  prompt_tokens: number
+  completion_tokens: number
+  reasoning_tokens: number
+  total_tokens: number
+  tool_runs: ToolRun[]
+}
+
+export interface TraceDetail extends TraceSummary {
+  model_calls: ModelCall[]
 }
 
 export interface ConversationSummary {

@@ -11,7 +11,7 @@ from sqlalchemy import text
 from app.core.config import get_settings
 from app.core.errors import register_exception_handlers
 from app.db import SessionLocal, engine, init_db
-from app.routers import admin, ai, chat, customers, orders, products, stats, tickets
+from app.routers import admin, ai, chat, customers, orders, products, stats, tickets, traces
 from app.services.seed import is_empty, seed_database
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -85,7 +85,7 @@ def create_app() -> FastAPI:
             conn.execute(text("SELECT 1"))
         return {"status": "ok", "environment": settings.environment}
 
-    for r in (customers, products, orders, tickets, stats, ai, chat, admin):
+    for r in (customers, products, orders, tickets, stats, ai, chat, traces, admin):
         app.include_router(r.router)
 
     return app

@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     Enum,
@@ -280,6 +281,7 @@ class ChatConversation(TimestampMixin, Base):
         cascade="all, delete-orphan",
         order_by="ChatMessage.id",
     )
+    traces: Mapped[list["ChatTrace"]] = relationship(cascade="all, delete-orphan", passive_deletes=True)
 
 
 class ChatMessage(Base):
@@ -294,20 +296,84 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
     conversation: Mapped[ChatConversation] = relationship(back_populates="messages")
-    # Tools the assistant ran while writing this message (empty for user messages).
-    tool_calls: Mapped[list["ChatToolCall"]] = relationship(
-        cascade="all, delete-orphan", order_by="ChatToolCall.id", lazy="selectin"
+    # The trace of the reply that produced this message (assistant messages only).
+    trace: Mapped["ChatTrace | None"] = relationship(viewonly=True, lazy="selectin")
+
+    @property
+    def tool_calls(self) -> list["ChatToolRun"]:
+        """Tools the assistant ran for this message (shown as chips)."""
+        return self.trace.tool_runs if self.trace else []
+
+    @property
+    def trace_id(self) -> int | None:
+        return self.trace.id if self.trace else None
+
+
+class ChatTrace(Base):
+    """Everything behind one assistant reply: each model call and tool run, with timings and tokens.
+
+    Saved for every reply, including ones that failed or were stopped (those have no message).
+    """
+
+    __tablename__ = "chat_traces"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("chat_conversations.id", ondelete="CASCADE"), index=True
+    )
+    message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("chat_messages.id", ondelete="CASCADE"), index=True
+    )
+    question: Mapped[str] = mapped_column(Text)
+    model: Mapped[str] = mapped_column(String(100))
+    status: Mapped[str] = mapped_column(String(16))  # "ok", "error" or "stopped"
+    error: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
+    duration_ms: Mapped[int] = mapped_column(Integer)
+    first_token_ms: Mapped[int | None] = mapped_column(Integer)  # until the first word reached the user
+    steps: Mapped[int] = mapped_column(Integer)  # model calls (passes round the loop)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)  # includes reasoning tokens
+    reasoning_tokens: Mapped[int] = mapped_column(Integer, default=0)
+
+    model_calls: Mapped[list["ChatModelCall"]] = relationship(
+        cascade="all, delete-orphan", order_by="ChatModelCall.step"
+    )
+    tool_runs: Mapped[list["ChatToolRun"]] = relationship(
+        cascade="all, delete-orphan", order_by="ChatToolRun.id", lazy="selectin"
     )
 
 
-class ChatToolCall(Base):
-    """One tool run during an assistant reply: shown as a chip in the chat, kept as a log."""
+class ChatModelCall(Base):
+    """One call to the model: one pass round the agent loop."""
 
-    __tablename__ = "chat_tool_calls"
+    __tablename__ = "chat_model_calls"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    message_id: Mapped[int] = mapped_column(ForeignKey("chat_messages.id", ondelete="CASCADE"), index=True)
+    trace_id: Mapped[int] = mapped_column(ForeignKey("chat_traces.id", ondelete="CASCADE"), index=True)
+    step: Mapped[int] = mapped_column(Integer)
+    request: Mapped[str] = mapped_column(Text)  # JSON: the exact messages, tools offered, tool_choice
+    response_text: Mapped[str] = mapped_column(Text, default="")
+    reasoning: Mapped[str] = mapped_column(Text, default="")
+    tool_calls: Mapped[str] = mapped_column(Text, default="[]")  # JSON: the tools it asked for
+    finish_reason: Mapped[str | None] = mapped_column(String(32))
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    reasoning_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[int] = mapped_column(Integer)
+    first_token_ms: Mapped[int | None] = mapped_column(Integer)
+
+
+class ChatToolRun(Base):
+    """One tool the assistant ran."""
+
+    __tablename__ = "chat_tool_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    trace_id: Mapped[int] = mapped_column(ForeignKey("chat_traces.id", ondelete="CASCADE"), index=True)
+    step: Mapped[int] = mapped_column(Integer)  # the model call that asked for it
     name: Mapped[str] = mapped_column(String(64))
     arguments: Mapped[str] = mapped_column(Text)  # JSON, exactly as the model sent it
     result: Mapped[str] = mapped_column(Text)  # JSON, exactly as the model received it
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    is_error: Mapped[bool] = mapped_column(Boolean, default=False)
+    duration_ms: Mapped[int] = mapped_column(Integer)

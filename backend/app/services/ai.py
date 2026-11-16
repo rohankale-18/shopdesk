@@ -51,6 +51,26 @@ class ToolCall:
         return {"id": self.id, "type": "function", "function": function}
 
 
+@dataclass
+class StreamEnd:
+    """The last item of every stream: how the call ended and what it cost (for tracing)."""
+
+    finish_reason: str | None = None  # "stop" (answered), "tool_calls", "length" (hit max_tokens)...
+    reasoning: str = ""  # the model's hidden thinking, if the model streams it (gpt-oss does)
+    usage: dict[str, int] = field(default_factory=dict)  # prompt / completion / reasoning tokens
+
+
+def _usage(raw: Any) -> dict[str, int]:
+    if raw is None:
+        return {}
+    details = getattr(raw, "completion_tokens_details", None)
+    return {
+        "prompt_tokens": raw.prompt_tokens or 0,
+        "completion_tokens": raw.completion_tokens or 0,
+        "reasoning_tokens": (details.reasoning_tokens if details else 0) or 0,
+    }
+
+
 @lru_cache
 def _client(api_key: str, timeout: float, max_retries: int) -> Groq:
     return Groq(api_key=api_key, timeout=timeout, max_retries=max_retries)
@@ -145,11 +165,12 @@ def stream(
     max_tokens: int | None = None,
     settings: Settings | None = None,
     **extra: Any,
-) -> Iterator[str | ToolCall]:
+) -> Iterator[str | ToolCall | StreamEnd]:
     """Start a streamed completion and return an iterator over the reply.
 
     The iterator yields text pieces (`str`) as they arrive. If the model asks for tools,
-    it yields one `ToolCall` per tool at the end, once each call is complete.
+    it yields one `ToolCall` per tool at the end, once each call is complete. The very
+    last item is a `StreamEnd` with the finish reason, reasoning text and token usage.
 
     The request is sent *before* this returns, so setup problems (no API key, key
     rejected, rate limit) raise right away, while the caller can still answer with a
@@ -164,15 +185,23 @@ def stream(
     with _provider_errors():
         chunks = client.chat.completions.create(**kwargs, stream=True)
 
-    def pieces() -> Iterator[str | ToolCall]:
+    def pieces() -> Iterator[str | ToolCall | StreamEnd]:
         # A tool call can arrive split over several chunks: the id and name first, then the
         # JSON arguments bit by bit. `index` says which call a piece belongs to.
         calls: dict[int, ToolCall] = {}
+        end = StreamEnd()
+        reasoning: list[str] = []
         with _provider_errors():
             for chunk in chunks:
-                if not chunk.choices:  # e.g. the final usage-only chunk
+                if chunk.usage:  # Groq sends the token counts on the last chunk
+                    end.usage = _usage(chunk.usage)
+                if not chunk.choices:
                     continue
-                delta = chunk.choices[0].delta
+                choice = chunk.choices[0]
+                end.finish_reason = choice.finish_reason or end.finish_reason
+                delta = choice.delta
+                if getattr(delta, "reasoning", None):
+                    reasoning.append(delta.reasoning)
                 if delta.content:
                     yield delta.content
                 for part in delta.tool_calls or []:
@@ -182,5 +211,7 @@ def stream(
                         call.name += part.function.name or ""
                         call.arguments += part.function.arguments or ""
         yield from calls.values()
+        end.reasoning = "".join(reasoning)
+        yield end
 
     return pieces()

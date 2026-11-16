@@ -1,5 +1,6 @@
 import { Suspense, useState } from 'react'
-import { CheckIcon, CopyIcon, DatabaseIcon, SparklesIcon } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { ActivityIcon, CheckIcon, CopyIcon, DatabaseIcon, SparklesIcon } from 'lucide-react'
 import { cn } from 'cn'
 
 import type { ToolUse } from '@/api/types'
@@ -73,10 +74,13 @@ function ToolChips({ tools }: { tools: ToolUse[] }) {
 export function AssistantMessage({
   content,
   tools = [],
+  traceId = null,
   streaming = false,
 }: {
   content: string
   tools?: ToolUse[]
+  /** Links to what happened behind this reply (model calls, tools, time, tokens). */
+  traceId?: number | null
   streaming?: boolean
 }) {
   return (
@@ -95,6 +99,18 @@ export function AssistantMessage({
         {!streaming && (
           <MessageFooter className="-ml-2 px-0 opacity-0 transition-opacity group-hover/reply:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100">
             <CopyButton text={content} />
+            {traceId !== null && (
+              <Button
+                variant="ghost"
+                size="xs"
+                className="text-muted-foreground"
+                nativeButton={false}
+                render={<Link to={`/traces/${traceId}`} />}
+              >
+                <ActivityIcon />
+                Details
+              </Button>
+            )}
           </MessageFooter>
         )}
       </MessageContent>

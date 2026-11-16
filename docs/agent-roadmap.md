@@ -9,20 +9,21 @@ The support assistant learns one capability at a time. Each step adds **one new 
 | 0 | Chat foundation | none | Streaming chat, stored conversations, system prompt | ✅ |
 | 1 | The agent loop | `get_store_overview` | Tool definitions and the tool-calling loop | ✅ |
 | 2 | Sales for any period | `get_sales` | Arguments the model works out (dates), combining tool results | ✅ |
-| 3 | Look up by ID | `get_order` | Arguments, errors as data, output size | ⬜ |
-| 4 | Search, then chain | `find_customer`, `list_customer_orders` | Multi-step reasoning, ambiguity, limits | ⬜ |
-| 5 | Tickets | `get_ticket`, `list_tickets` | Summarizing real data, page context | ⬜ |
-| 6 | Products and stock | `search_products` | Grounding: never invent facts | ⬜ |
-| 7 | Analytics and charts | `sales_by_day`, `top_products` | Structured output rendered as charts | ⬜ |
-| 8 | Actions with approval | `draft_ticket_reply`, `create_refund`, `cancel_order` | Human in the loop, backend-enforced rules | ⬜ |
-| 9 | Evals | none | Measuring whether a change made the agent better | ⬜ |
+| 3 | Tracing | none | See every model call, tool run, token and millisecond behind a reply | ✅ |
+| 4 | Look up by ID | `get_order` | Arguments, errors as data, output size | ⬜ |
+| 5 | Search, then chain | `find_customer`, `list_customer_orders` | Multi-step reasoning, ambiguity, limits | ⬜ |
+| 6 | Tickets | `get_ticket`, `list_tickets` | Summarizing real data, page context | ⬜ |
+| 7 | Products and stock | `search_products` | Grounding: never invent facts | ⬜ |
+| 8 | Analytics and charts | `sales_by_day`, `top_products` | Structured output rendered as charts | ⬜ |
+| 9 | Actions with approval | `draft_ticket_reply`, `create_refund`, `cancel_order` | Human in the loop, backend-enforced rules | ⬜ |
+| 10 | Evals | none | Measuring whether a change made the agent better | ⬜ |
 
 ---
 
 ## Principles (apply to every step)
 
 - **Tools call the service layer directly** (`app/services/...`), not ShopDesk's own HTTP API. They share the same validation and business rules.
-- **Read-only before write.** No tool changes data until Step 8, and then only with human approval.
+- **Read-only before write.** No tool changes data until Step 9, and then only with human approval.
 - **One step at a time.** Add the tool, try the test questions, note what happened, then move on.
 - **Rules live in the backend.** The model's judgement is never the safety net; the code enforces limits (e.g. refund amounts).
 - **Log every tool call and its result.** When the agent does something odd, the log tells you why.
@@ -88,7 +89,7 @@ Already in place before the agent work starts.
 
 **Notes / what I learned**
 - (observed) The first version returned flat keys like `revenue_usd` and `open_tickets`. The model reported 30-day revenue as "after refunds", put all-time order counts under "this month", and misread the ticket numbers. Grouping the output by period with explicit names (`all_time`, `last_30_days.revenue_before_refunds_usd`, `tickets_now.open_or_pending`) fixed all three. Tool output is part of the prompt.
-- (observed) "Open tickets": the app's badge counts open + pending (2,551), but the model reported status `open` only (1,781). Fixed in the tool, not the system prompt: the field is now `tickets_now.open_tickets`, and the description defines it as "open or pending, the same number as the Tickets badge". What a field means belongs with the tool. If several tools share the term later (Step 5), move it into a glossary in the system prompt.
+- (observed) "Open tickets": the app's badge counts open + pending (2,551), but the model reported status `open` only (1,781). Fixed in the tool, not the system prompt: the field is now `tickets_now.open_tickets`, and the description defines it as "open or pending, the same number as the Tickets badge". What a field means belongs with the tool. If several tools share the term later (Step 6), move it into a glossary in the system prompt.
 - (observed) A fixed tool tempts the model to do arithmetic. Asked "How did we do last week?", it took the 30-day numbers, divided by 3 and subtracted all-time refunds from 30-day revenue. Two fixes:
   - Today's date in the system prompt (`system_prompt()`, added last so the fixed text stays identical between requests).
   - A rule to report figures exactly as returned, never derive new ones, and say so when no tool has the exact period.
@@ -137,7 +138,46 @@ Already in place before the agent work starts.
 
 ---
 
-## Step 3: Look up by ID ⬜
+## Step 3: Tracing ✅
+
+**No new tool.** Record everything behind each reply, and show it on a page.
+
+**Why now:** from Step 5 on, the loop goes round several times (search, then look up, then answer). Twice already (the "last week" dates and the closed tickets question) we had to dig through terminal logs or the database to see what the model was given. Step 10 (evals) builds on the same data.
+
+**What gets recorded (one trace per reply)**
+- **The reply:** question, status (ok / error / stopped), total time, time until the first word, loop passes, tokens.
+- **Each model call:** the exact messages sent, the tools offered and `tool_choice`, the model's reasoning text, its reply or tool requests, `finish_reason`, tokens (prompt / output / reasoning), time.
+- **Each tool run:** name, arguments, result, whether it was an error, time.
+
+**What you learn**
+- What the model actually receives on each pass: the prompt grows by the tool results every time round the loop.
+- Why it chose a tool (its reasoning), and where the time and tokens go (reasoning tokens vs answer tokens).
+- How tracing tools like Langfuse, LangSmith and Phoenix work, by building a small one.
+
+**Tasks**
+- [x] `ai.stream()` ends every stream with a `StreamEnd`: `finish_reason`, token usage (prompt / output / reasoning), and the reasoning text gpt-oss streams in `delta.reasoning`
+- [x] Trace tables (`chat_traces`, `chat_model_calls`, `chat_tool_runs`), recorded in `_agent_loop` via a `TraceRecorder` (`app/services/tracing.py`). These replace `chat_tool_calls`; chips now come from the trace.
+- [x] Traces are saved for failed (`error`) and stopped (`stopped`) replies too
+- [x] API: `GET /api/traces` and `GET /api/traces/{id}` (`app/routers/traces.py`)
+- [x] UI: a "Details" link on each reply, a **Traces** page (list), and a trace page with stats, a time bar, and a step-by-step timeline: the prompt sent (new messages highlighted), reasoning, tool requests, tool arguments and results
+- [x] Tests: `tests/test_traces.py`
+
+**How to use it**
+- After any odd answer: **Details** under the reply, then read the reasoning of each model call. It says *why* a tool was or wasn't chosen.
+- "Prompt sent": the messages marked **new this call** show how the prompt grows round the loop.
+- The Traces list: sort by eye for slow replies (Time) or expensive ones (Tokens).
+
+**Notes / what I learned**
+- (observed) **Reasoning tokens are most of the output.** A 3-word "hi" cost 89 output tokens, 76 of them hidden reasoning. You pay for (and wait for) thinking the user never sees.
+- (observed) **The model calls tools one at a time.** For "revenue since the 1st, and open tickets?" its reasoning planned both tools in call 1, but it asked for `get_sales`, then `get_store_overview` in call 2, then answered in call 3. Each pass re-sends the whole prompt (1,375 → 1,470 → ~1,900 tokens in), so the reply cost ~5,000 tokens. Asking for both at once would save a pass. Something to try in the prompt or tool descriptions, then measure here.
+- (observed) **The system prompt is the bulk of every call.** About 1,300 of the ~1,400 input tokens on a first call, re-sent every pass. Keep it tight; prompt caching would help if the provider supports it.
+- (observed) **Stop isn't instant through the dev proxy.** A reply stopped in the browser via Vite's proxy kept generating for ~30 s on the server (its trace says 32 s) before the server noticed. Disconnecting directly was noticed in ~2 s. The server can't stop what it doesn't know about. A real "cancel" call would fix it if it matters.
+- (observed) The old `chat_tool_calls` table may still exist in an existing database. It's no longer used and is safe to drop.
+-
+
+---
+
+## Step 4: Look up by ID ⬜
 
 **Tool:** `get_order(order_number)`
 
@@ -161,7 +201,7 @@ Already in place before the agent work starts.
 
 ---
 
-## Step 4: Search, then chain ⬜
+## Step 5: Search, then chain ⬜
 
 **Tools:** `find_customer(query)`, `list_customer_orders(customer_id)`
 
@@ -185,7 +225,7 @@ Already in place before the agent work starts.
 
 ---
 
-## Step 5: Tickets ⬜
+## Step 6: Tickets ⬜
 
 **Tools:** `get_ticket(id)`, `list_tickets(status, priority)`
 
@@ -208,7 +248,7 @@ Already in place before the agent work starts.
 
 ---
 
-## Step 6: Products and stock ⬜
+## Step 7: Products and stock ⬜
 
 **Tool:** `search_products(query)`
 
@@ -228,7 +268,7 @@ Already in place before the agent work starts.
 
 ---
 
-## Step 7: Analytics and charts ⬜
+## Step 8: Analytics and charts ⬜
 
 **Tools:** `sales_by_day`, `top_products` (or similar), returning rows of data
 
@@ -249,7 +289,7 @@ Already in place before the agent work starts.
 
 ---
 
-## Step 8: Actions with approval ⬜
+## Step 9: Actions with approval ⬜
 
 **Tools, in this order:** `draft_ticket_reply` (low risk, only fills a draft), then `create_refund`, `cancel_order`
 
@@ -274,7 +314,7 @@ Already in place before the agent work starts.
 
 ---
 
-## Step 9: Evals ⬜
+## Step 10: Evals ⬜
 
 **What you learn:** how to know whether a prompt or tool change made the agent better or worse.
 
