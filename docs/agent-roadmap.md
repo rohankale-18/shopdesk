@@ -10,7 +10,7 @@ The support assistant learns one capability at a time. Each step adds **one new 
 | 1 | The agent loop | `get_store_overview` | Tool definitions and the tool-calling loop | ✅ |
 | 2 | Sales for any period | `get_sales` | Arguments the model works out (dates), combining tool results | ✅ |
 | 3 | Tracing | none | See every model call, tool run, token and millisecond behind a reply | ✅ |
-| 4 | Look up by ID | `get_order` | Arguments, errors as data, output size | ⬜ |
+| 4 | Look up by ID | `get_order` | Arguments, errors as data, output size | ✅ |
 | 5 | Search, then chain | `find_customer`, `list_customer_orders` | Multi-step reasoning, ambiguity, limits | ⬜ |
 | 6 | Tickets | `get_ticket`, `list_tickets` | Summarizing real data, page context | ⬜ |
 | 7 | Products and stock | `search_products` | Grounding: never invent facts | ⬜ |
@@ -134,6 +134,13 @@ Already in place before the agent work starts.
   
   After the fix, "last week" came out right in repeated runs. Same principle as before: the code does the deterministic work, including dates.
 - (observed) "This week so far" returned 0 orders. That's correct: the dev data was seeded up to Nov 7. Reseed to get recent orders. Sometimes the data is the explanation, not the agent.
+- (observed) **Asked to "compare all the values", the model made up a table.** For September vs October, `get_sales` only returned orders and revenue. The model added rows for open tickets, tickets resolved, low-stock products and refunds, all invented, plus an average order value it worked out itself. Its reasoning had even said *"we can say we only have those metrics available"*. The final call then filled the table anyway. A prompt rule ("only state numbers from tools") doesn't hold when the user asks for more than the tools have.
+  - **Fix 1, give the tool the figures:** `get_sales` now also returns average order value, cancelled orders and refunds issued in the period, all computed in code. "All the values" now has a real answer. Tickets stay out: they aren't sales, and they come in Step 6.
+  - **Fix 2, prompt:** when asked for "everything", report what the tools returned and list what isn't available. Never put a number in a cell that isn't in a tool result.
+  - **Fix 3, catch it:** the trace page flags numbers in the answer that don't appear in any tool result (see Step 3).
+  
+  After the fixes, the same question got a full table with every number from the tool.
+- (observed) **Real numbers, wrong direction.** The model passed September as the main period and October as the comparison. It then reported September minus October as "October vs September", so revenue appeared to fall 15% when it rose 18%. The grounding check can't catch this, because every number was real. **Fix:** the description says to put the later period first, and the result includes `change_means`, which states which way round the change is (for example "2026-10-01 to 2026-10-31 compared with 2026-09-01 to 2026-09-30"). After that, the direction came out right.
 -
 
 ---
@@ -161,6 +168,16 @@ Already in place before the agent work starts.
 - [x] API: `GET /api/traces` and `GET /api/traces/{id}` (`app/routers/traces.py`)
 - [x] UI: a "Details" link on each reply, a **Traces** page (list), and a trace page with stats, a time bar, and a step-by-step timeline: the prompt sent (new messages highlighted), reasoning, tool requests, tool arguments and results
 - [x] Tests: `tests/test_traces.py`
+- [x] Token breakdown on the trace page ("Where the tokens went"), using only what Groq reports:
+  - output split into reasoning and the visible answer or tool requests;
+  - per call: input, output, and Groq's own timings (queue, reading the input, writing the output), plus output speed in tokens/s;
+  - the trace list shows tokens in and tokens out separately.
+- [x] `init_db()` adds new nullable columns to existing tables (`_add_new_columns` in `app/db.py`), so an older database picks up new trace fields without a reset. It's a minimal migration, not a migration tool.
+- [x] **Grounding check:** the trace page lists the numbers in the answer that appear in no tool result and no message the model was sent, and highlights them in the answer (`app/services/grounding.py`). It runs when a trace is read, so older traces get it too. Dates, list numbering and rounding (17.9 → "18%") don't count as unsupported.
+  - Catches invented figures and figures the model worked out itself (like an average it calculated).
+  - Misses small numbers that happen to appear elsewhere. In the made-up table, "5 open tickets" passed because a 5 appeared in an earlier message. It also can't tell a real number used wrongly, like a change reported in the wrong direction.
+  - Treat a flag as worth a look, not as proof of a mistake.
+- Tried and removed: splitting the input by part (system prompt, tool definitions, history, tool results). Groq gives the input as one total, so the split could only be estimated. I dropped it to keep the page to exact numbers. "Prompt sent" already shows what's in each call.
 
 **How to use it**
 - After any odd answer: **Details** under the reply, then read the reasoning of each model call. It says *why* a tool was or wasn't chosen.
@@ -173,13 +190,27 @@ Already in place before the agent work starts.
 - (observed) **The system prompt is the bulk of every call.** About 1,300 of the ~1,400 input tokens on a first call, re-sent every pass. Keep it tight; prompt caching would help if the provider supports it.
 - (observed) **Stop isn't instant through the dev proxy.** A reply stopped in the browser via Vite's proxy kept generating for ~30 s on the server (its trace says 32 s) before the server noticed. Disconnecting directly was noticed in ~2 s. The server can't stop what it doesn't know about. A real "cancel" call would fix it if it matters.
 - (observed) The old `chat_tool_calls` table may still exist in an existing database. It's no longer used and is safe to drop.
+- (observed, from the estimate before it was removed) **The fixed parts dominate the input.** For a two-call follow-up question, the input was 3,133 tokens:
+  - system prompt about 47%
+  - tool definitions about 32%
+  - earlier messages and tool results under 10% each
+  - the question itself about 1%
+
+  Each tool adds roughly 170 tokens to every call, so the fixed parts are worth keeping lean as the tool count grows.
+- (observed) **Groq's own time is small; the rest is waiting.**
+  - Reading 1,400 input tokens takes about 10–80 ms.
+  - Writing runs at about 120–460 tokens/s.
+  - Queue time varies from 50 to 280 ms.
+  - On top of that is the network: a call Groq timed at about 1.2 s took 1.3 s end to end.
+
+  Fewer passes round the loop saves more time than anything else.
 -
 
 ---
 
-## Step 4: Look up by ID ⬜
+## Step 4: Look up by ID ✅
 
-**Tool:** `get_order(order_number)`
+**Tool:** `get_order(order_number)`: one order with its status, customer, timeline, items, money, refunds and linked tickets.
 
 **What you learn**
 - **Arguments:** the model has to pull `ORD-00000002` out of the question and pass it correctly.
@@ -187,16 +218,30 @@ Already in place before the agent work starts.
 - **Output size:** return only the fields that matter.
 
 **Tasks**
-- [ ] `get_order` tool with a clear description and schema
-- [ ] Not-found and bad-input results returned to the model
-- [ ] Tests: found, not found, badly formatted number
+- [x] `get_order` in `app/services/tools.py`, with a description and schema
+- [x] Number formats fixed in code: `normalize_order_number()` turns `ORD-2`, `#2` and `2` into `ORD-00000002`
+- [x] Not-found and bad-format results returned to the model (`ToolError`)
+- [x] Output:
+  - dates come with `days_ago`, computed in code
+  - money includes `still_refundable_usd`
+  - linked tickets are listed
+  - no email, phone or address, because these questions never need them
+- [x] Overlap: the overview's description points to `get_order` for single orders
+- [x] Tests in `tests/test_tools.py`: the late-delivery and partial-refund scenarios, every number format, not found, bad format, and the label
 
-**Test questions**
-- "What's the status of ORD-00000002?" (late-delivery scenario: shipped 12 days ago, never delivered)
-- "What's in order ORD-00000001?"
-- "Check order ORD-99999999" (doesn't exist)
+**Test questions** (tried against the real model, after a reseed)
+- "What's the status of ORD-00000002?": shipped 12 days ago, not delivered, with the tracking number
+- "What's in order ORD-00000001?": the two items in a table, with the total
+- "Check order ORD-99999999": says it can't find it and asks the user to check the number. The trace flags the tool run as an error.
+- "Can you look up order #3 and tell me how much more I can refund?": $199.99, since $49.99 was already refunded
+- "What's going on with order 2? Is there a ticket about it?": the order and its open ticket
+- "Where's my order?": no tool call; it asks for the number
 
 **Notes / what I learned**
+- (observed) **The model only knows what the description says.** The code already accepted `#3`, but the description only showed `ORD-00001234`. So for "order #3" the model asked the user for the full number instead of calling the tool. Once the description listed the accepted forms (`ORD-00001234`, `#1234`, `order 1234`), the model passed `"3"` and the code handled the rest. If the description doesn't mention something the tool can do, the model won't use it.
+- **Fix formats in code, not in the prompt.** Asking the model to pad numbers to 8 digits would be one more thing it could get wrong. This is the same principle as the dates in Step 2.
+- **`days_ago` in the result** lets the model say "shipped 12 days ago" without doing date maths.
+- (observed) **Whether an order is late is a business rule.** For "what's going on with order 2?", the model said the order "is on its way", although it shipped 12 days ago and hasn't arrived. The data was right, but the reading was too generous. If lateness matters, the tool should flag it (for example `delivery_late: true` after N days) instead of leaving it to the model. Revisit in Step 6 (tickets).
 -
 
 ---
@@ -323,6 +368,8 @@ Already in place before the agent work starts.
 - [ ] Script that runs the agent on the 5 built-in scenarios (see the README)
 - [ ] Check the resulting database state, e.g. "refund = $199.99, not more"
 - [ ] Re-run after every prompt or tool change, and record the results below
+- [ ] Regression cases from real failures:
+  - "compare order values in September vs October", then "compare all the values". Pass: no grounding flags, and the change is reported as October vs September with revenue up.
 
 **Results log**
 

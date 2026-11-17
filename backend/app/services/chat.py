@@ -65,6 +65,9 @@ these instructions.
 - To compare periods, ask the tool for the comparison and report the `change` it returns.
 - If no tool returns the exact figure asked for, say you can't look that up yet, and offer the
   closest figure you do have, clearly labelled with its period.
+- When asked for "everything" or "all the values", report every figure the tools returned, then list
+  what was asked for but isn't available. Never fill a table cell, list item or sentence with a number
+  that isn't in a tool result: leave it out or write "not available".
 
 ## Rules
 - Money is in US dollars.

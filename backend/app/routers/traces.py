@@ -1,5 +1,6 @@
 """Traces: what happened behind each assistant reply (model calls, tool runs, timings, tokens)."""
 
+import json
 from datetime import datetime
 from typing import Annotated, Any
 
@@ -11,6 +12,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.errors import NotFoundError
 from app.db import get_db
 from app.models import ChatTrace
+from app.services import grounding
 
 router = APIRouter(prefix="/api/traces", tags=["traces"])
 DB = Annotated[Session, Depends(get_db)]
@@ -39,6 +41,9 @@ class ModelCallOut(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     reasoning_tokens: int
+    queue_ms: int | None  # Groq's own timings; our duration_ms adds the network on top
+    input_ms: int | None
+    output_ms: int | None
     duration_ms: int
     first_token_ms: int | None
 
@@ -70,6 +75,19 @@ class TraceSummary(BaseModel):
 
 class TraceDetail(TraceSummary):
     model_calls: list[ModelCallOut]
+
+    @computed_field
+    @property
+    def unsupported_numbers(self) -> list[str]:
+        """Numbers in the reply that no tool result or message contains (see `grounding`).
+
+        Worked out when the trace is read, so it also covers traces saved before it existed.
+        """
+        reply = "".join(c.response_text for c in self.model_calls)
+        sent = self.model_calls[-1].request["messages"] if self.model_calls else []
+        sources = [json.dumps(m) for m in sent if m["role"] != "system"]
+        sources += [json.dumps(r.result) for r in self.tool_runs]
+        return grounding.unsupported_numbers(reply, sources)
 
 
 @router.get("", response_model=list[TraceSummary])

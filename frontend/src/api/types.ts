@@ -251,6 +251,10 @@ export interface ModelCall {
   prompt_tokens: number
   completion_tokens: number
   reasoning_tokens: number
+  /** Groq's own timings. duration_ms is longer: it includes the network. */
+  queue_ms: number | null
+  input_ms: number | null
+  output_ms: number | null
   duration_ms: number
   first_token_ms: number | null
 }
@@ -285,6 +289,8 @@ export interface TraceSummary {
 
 export interface TraceDetail extends TraceSummary {
   model_calls: ModelCall[]
+  /** Numbers in the reply that no tool result or message contains (as written in the reply). */
+  unsupported_numbers: string[]
 }
 
 export interface ConversationSummary {

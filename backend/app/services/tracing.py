@@ -128,6 +128,9 @@ def save(
                 prompt_tokens=c.end.usage.get("prompt_tokens", 0),
                 completion_tokens=c.end.usage.get("completion_tokens", 0),
                 reasoning_tokens=c.end.usage.get("reasoning_tokens", 0),
+                queue_ms=c.end.usage.get("queue_ms"),
+                input_ms=c.end.usage.get("input_ms"),
+                output_ms=c.end.usage.get("output_ms"),
                 duration_ms=c.duration_ms or _ms_since(c.started),  # unfinished (stopped / failed) calls
                 first_token_ms=c.first_token_ms,
             )

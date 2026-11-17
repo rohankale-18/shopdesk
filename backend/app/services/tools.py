@@ -11,14 +11,17 @@ To add a tool: write the function, add a `Tool(...)` to `TOOLS`. Nothing else ch
 
 import json
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
+from app.models import Order, Ticket
 from app.services.stats import sales_totals, store_overview
 
 logger = logging.getLogger("shopdesk.tools")
@@ -62,9 +65,13 @@ def compare(current: dict[str, Any], previous: dict[str, Any], fields: list[str]
     """The change between two periods, computed here so the model never does the arithmetic.
 
     For each field: the difference, and the % change (None when the previous value is 0).
+    A field missing in either period (None, e.g. no orders to average) has no change.
     """
     change: dict[str, Any] = {}
     for f in fields:
+        if current[f] is None or previous[f] is None:
+            change[f] = change[f"{f}_pct"] = None
+            continue
         diff = current[f] - previous[f]
         change[f] = round(diff, 2) if isinstance(diff, float) else diff
         change[f"{f}_pct"] = round(diff / previous[f] * 100, 1) if previous[f] else None
@@ -106,14 +113,29 @@ def get_store_overview(db: Session) -> dict[str, Any]:
 
 
 def _sales(db: Session, start: date, end: date) -> dict[str, Any]:
-    orders, revenue_cents = sales_totals(db, start, end)
+    s = sales_totals(db, start, end)
     return {
         "from": start.isoformat(),
         "to": end.isoformat(),
         "days": (end - start).days + 1,
-        "orders_placed": orders,
-        "revenue_before_refunds_usd": _usd(revenue_cents),
+        "orders_placed": s.orders,
+        "revenue_before_refunds_usd": _usd(s.revenue_cents),
+        # Computed here, not by the model: it's a division, and models get those wrong.
+        "average_order_value_usd": _usd(round(s.revenue_cents / s.orders)) if s.orders else None,
+        "cancelled_orders": s.cancelled_orders,
+        "refunds_issued": s.refunds,
+        "refunded_usd": _usd(s.refunded_cents),
     }
+
+
+SALES_FIELDS = [
+    "orders_placed",
+    "revenue_before_refunds_usd",
+    "average_order_value_usd",
+    "cancelled_orders",
+    "refunds_issued",
+    "refunded_usd",
+]
 
 
 def get_sales(
@@ -129,10 +151,66 @@ def get_sales(
             raise ToolError("To compare, give both compare_start_date and compare_end_date.")
         names = ("compare_start_date", "compare_end_date")
         result["comparison"] = _sales(db, *parse_period(compare_start_date, compare_end_date, names))
-        result["change"] = compare(
-            result["period"], result["comparison"], ["orders_placed", "revenue_before_refunds_usd"]
+        p, c = result["period"], result["comparison"]
+        # Spelled out, because the model mixed up the direction when the periods were passed
+        # earlier-first: it reported September minus October as "October vs September".
+        result["change_means"] = (
+            f"{p['from']} to {p['to']} compared with {c['from']} to {c['to']}: "
+            "positive means higher in the first."
         )
+        result["change"] = compare(p, c, SALES_FIELDS)
     return result
+
+
+ORDER_NUMBER = re.compile(r"(?:ORD)?[\s#-]*(\d{1,8})", re.IGNORECASE)
+
+
+def normalize_order_number(value: Any) -> str:
+    """'ORD-00000002', 'ord-2', '#2', '2' -> 'ORD-00000002'. The code fixes the format, not the model."""
+    match = ORDER_NUMBER.fullmatch(str(value).strip())
+    if not match:
+        raise ToolError(f"order_number should look like ORD-00001234, got {value!r}.")
+    return f"ORD-{int(match[1]):08d}"
+
+
+def _day(when: datetime | None, today: date) -> dict[str, Any] | None:
+    # "days_ago" is computed here so the model can say "shipped 12 days ago" without date math.
+    return None if when is None else {"on": when.date().isoformat(), "days_ago": (today - when.date()).days}
+
+
+def get_order(db: Session, order_number: str) -> dict[str, Any]:
+    number = normalize_order_number(order_number)
+    order = db.scalar(select(Order).where(Order.number == number))
+    if order is None:
+        raise ToolError(f"There is no order {number}. Check the number with the user.")
+    today = datetime.now(UTC).date()
+    tickets = db.scalars(select(Ticket).where(Ticket.order_id == order.id).order_by(Ticket.id))
+    return {
+        "number": order.number,
+        "status": order.status,
+        "customer": {"id": order.customer_id, "name": order.customer.name, "tier": order.customer.tier},
+        "placed": _day(order.placed_at, today),
+        "shipped": _day(order.shipped_at, today),
+        "delivered": _day(order.delivered_at, today),
+        "tracking_number": order.tracking_number,
+        "items": [
+            {
+                "product": i.product_name,
+                "quantity": i.quantity,
+                "unit_price_usd": _usd(i.unit_price_cents),
+                "line_total_usd": _usd(i.line_total_cents),
+            }
+            for i in order.items
+        ],
+        "total_usd": _usd(order.total_cents),
+        "refunded_usd": _usd(order.refunded_cents),
+        "still_refundable_usd": _usd(order.refundable_cents),
+        "refunds": [
+            {"on": r.created_at.date().isoformat(), "amount_usd": _usd(r.amount_cents), "reason": r.reason}
+            for r in order.refunds
+        ],
+        "tickets": [{"id": t.id, "subject": t.subject, "status": t.status} for t in tickets],
+    }
 
 
 # ---------- the registry ----------
@@ -177,7 +255,7 @@ TOOLS = {
                 "open, answer with open_tickets; give the by_status breakdown only if it helps. "
                 "Use it for questions like 'How are we doing?' or 'How many open tickets are there?'. "
                 "For sales in a specific period (last week, last 10 days, a month...), use get_sales. "
-                "It has no details about individual orders, customers or tickets."
+                "It has no details about individual orders (use get_order), customers or tickets."
             ),
             parameters=NO_ARGUMENTS,
             run=get_store_overview,
@@ -186,11 +264,15 @@ TOOLS = {
             name="get_sales",
             label=_sales_label,
             description=(
-                "Orders placed and revenue (before refunds; cancelled orders excluded) for any period. "
+                "Sales for any period: orders placed and revenue (before refunds; cancelled orders "
+                "excluded), average order value, cancelled orders, and refunds issued in the period "
+                "(count and amount). It has nothing on tickets or stock. "
                 "Use it whenever a question names a period: 'last 10 days', 'last week', 'in October', "
-                "'since the 1st'. To compare two periods, also pass compare_start_date and "
-                "compare_end_date: the result then includes `change` (difference and % change), so "
-                "you never need to calculate it. Dates are YYYY-MM-DD, inclusive, UTC; weeks run "
+                "'since the 1st'. To compare two periods, put the later period in start_date/end_date "
+                "and the earlier one in compare_start_date/compare_end_date: the result then "
+                "includes `change` (later minus earlier, and % change) and `change_means`, which "
+                "says which way round it is, so you never need to calculate it. "
+                "Dates are YYYY-MM-DD, inclusive, UTC; weeks run "
                 "Monday to Sunday. For headline numbers without a period, use get_store_overview."
             ),
             parameters={
@@ -198,12 +280,37 @@ TOOLS = {
                 "properties": {
                     "start_date": _date_param("First day, YYYY-MM-DD."),
                     "end_date": _date_param("Last day (inclusive), YYYY-MM-DD."),
-                    "compare_start_date": _date_param("Optional: first day of the period to compare with."),
-                    "compare_end_date": _date_param("Optional: last day of the period to compare with."),
+                    "compare_start_date": _date_param("Optional: first day of the earlier period."),
+                    "compare_end_date": _date_param("Optional: last day of the earlier period."),
                 },
                 "required": ["start_date", "end_date"],
             },
             run=get_sales,
+        ),
+        Tool(
+            name="get_order",
+            label=lambda a: f"Looked up order {a['order_number']}",
+            description=(
+                "One order by its number: status, customer, when it was placed, shipped and delivered "
+                "(with days ago), tracking number, items, total, refunds and what can still be "
+                "refunded, and any support tickets about it. Use it whenever the user refers to a "
+                "specific order by number, in any form: ORD-00001234, #1234, 'order 1234'. It can't "
+                "search: without a number, ask the user for one."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "order_number": {
+                        "type": "string",
+                        "description": (
+                            "The order number as the user gave it: 'ORD-00001234', '#1234' and '1234' "
+                            "all work, the tool fills in the rest."
+                        ),
+                    }
+                },
+                "required": ["order_number"],
+            },
+            run=get_order,
         ),
     ]
 }

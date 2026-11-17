@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import select
 
 from app.db import SessionLocal
-from app.models import Order, OrderStatus
+from app.models import Order, OrderStatus, Refund
 from app.services import tools
 
 PERIOD = ("2026-05-01", "2026-05-31")  # inside the seeded data (anchor date 2026-06-01)
@@ -17,30 +17,43 @@ def run(name: str, **arguments) -> dict:
     return tools.run(name, json.dumps(arguments))
 
 
-def expected_sales(start: date, end: date) -> tuple[int, float]:
-    """Orders and revenue for a period, counted the slow, obvious way."""
+def expected_sales(start: date, end: date) -> dict:
+    """A period's sales figures, counted the slow, obvious way."""
+    within = lambda when: start <= when.astimezone(UTC).date() <= end  # noqa: E731
     with SessionLocal() as db:
-        orders = [
-            o
-            for o in db.scalars(select(Order))
-            if start <= o.placed_at.astimezone(UTC).date() <= end and o.status != OrderStatus.cancelled
-        ]
-    return len(orders), round(sum(o.total_cents for o in orders) / 100, 2)
+        placed = [o for o in db.scalars(select(Order)) if within(o.placed_at)]
+        refunds = [r for r in db.scalars(select(Refund)) if within(r.created_at)]
+    kept = [o for o in placed if o.status != OrderStatus.cancelled]
+    revenue = sum(o.total_cents for o in kept)
+    return {
+        "orders_placed": len(kept),
+        "revenue_before_refunds_usd": round(revenue / 100, 2),
+        "average_order_value_usd": round(revenue / len(kept) / 100, 2),
+        "cancelled_orders": len(placed) - len(kept),
+        "refunds_issued": len(refunds),
+        "refunded_usd": round(sum(r.amount_cents for r in refunds) / 100, 2),
+    }
 
 
 def test_get_sales_totals_match_the_orders(client):
     result = run("get_sales", start_date=PERIOD[0], end_date=PERIOD[1])
-    period = result["period"]
-    orders, revenue = expected_sales(date(2026, 5, 1), date(2026, 5, 31))
-    assert orders > 0  # the period really has data
-    assert period == {
-        "from": "2026-05-01",
-        "to": "2026-05-31",
-        "days": 31,
-        "orders_placed": orders,
-        "revenue_before_refunds_usd": revenue,
-    }
+    expected = expected_sales(date(2026, 5, 1), date(2026, 5, 31))
+    assert expected["orders_placed"] > 0 and expected["refunds_issued"] > 0  # the period has data
+    assert result["period"] == {"from": "2026-05-01", "to": "2026-05-31", "days": 31, **expected}
     assert "comparison" not in result
+
+
+def test_a_period_without_orders_has_no_average(client):
+    period = run("get_sales", start_date="2020-01-01", end_date="2020-01-31")["period"]
+    assert (period["orders_placed"], period["average_order_value_usd"]) == (0, None)
+    compared = run(
+        "get_sales",
+        start_date="2020-01-01",
+        end_date="2020-01-31",
+        compare_start_date=PERIOD[0],
+        compare_end_date=PERIOD[1],
+    )
+    assert compared["change"]["average_order_value_usd"] is None  # nothing to compare with
 
 
 def test_get_sales_compares_two_periods(client):
@@ -55,6 +68,8 @@ def test_get_sales_compares_two_periods(client):
     assert result["change"]["orders_placed"] == now["orders_placed"] - before["orders_placed"]
     diff = now["revenue_before_refunds_usd"] - before["revenue_before_refunds_usd"]
     assert result["change"]["revenue_before_refunds_usd"] == round(diff, 2)
+    assert set(result["change"]) == {f for name in tools.SALES_FIELDS for f in (name, f"{name}_pct")}
+    assert result["change_means"].startswith("2026-05-16 to 2026-05-31 compared with 2026-05-01")
 
 
 def test_compare_handles_a_zero_previous_value():
@@ -97,3 +112,55 @@ def test_labels_show_the_arguments():
     assert tools.label("get_sales", json.dumps(args)).endswith("vs 2026-10-27 to 2026-11-02")
     assert tools.label("get_sales", "not json") == "Used get_sales"  # never breaks the chat
     assert tools.label("get_store_overview") == "Looked up store overview"
+
+
+# ---------- get_order ----------
+
+
+def test_get_order_returns_the_late_delivery_scenario(client):
+    order = run("get_order", order_number="ORD-00000002")
+    today = datetime.now(UTC).date()
+    shipped = date(2026, 5, 20)  # 12 days before the seed's anchor date
+    assert order["number"] == "ORD-00000002"
+    assert order["status"] == "shipped"
+    assert order["customer"]["name"] == "Marcus Lee"
+    assert order["shipped"] == {"on": shipped.isoformat(), "days_ago": (today - shipped).days}
+    assert order["delivered"] is None
+    assert order["items"] == [
+        {"product": "Halo Desk Lamp", "quantity": 1, "unit_price_usd": 49.99, "line_total_usd": 49.99}
+    ]
+    assert [t["subject"] for t in order["tickets"]] == ["Still waiting for my lamp"]
+
+
+def test_get_order_shows_what_is_still_refundable(client):
+    order = run("get_order", order_number="ORD-00000003")  # lamp already refunded
+    assert (order["total_usd"], order["refunded_usd"], order["still_refundable_usd"]) == (
+        249.98,
+        49.99,
+        199.99,
+    )
+    assert order["refunds"][0]["reason"] == "wrong_item"
+
+
+@pytest.mark.parametrize("given", ["ORD-00000002", "ord-00000002", "ORD-2", "#2", "2", " ORD 2 "])
+def test_order_number_formats_are_normalized(given):
+    assert tools.normalize_order_number(given) == "ORD-00000002"
+
+
+@pytest.mark.parametrize(
+    ("given", "message"),
+    [
+        ("ORD-99999999", "There is no order ORD-99999999"),
+        ("order two", "should look like ORD-00001234"),
+        ("ORD-123456789", "should look like ORD-00001234"),  # too many digits
+        ("", "should look like ORD-00001234"),
+    ],
+)
+def test_get_order_problems_go_back_to_the_model(client, given, message):
+    result = run("get_order", order_number=given)
+    assert list(result) == ["error"]
+    assert message in result["error"]
+
+
+def test_get_order_label():
+    assert tools.label("get_order", '{"order_number": "ORD-00000002"}') == "Looked up order ORD-00000002"

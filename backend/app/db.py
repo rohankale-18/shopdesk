@@ -1,6 +1,6 @@
 from collections.abc import Iterator
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -46,4 +46,23 @@ def get_db() -> Iterator[Session]:
 def init_db(bind: Engine | None = None) -> None:
     from app import models  # noqa: F401  (register models on Base.metadata)
 
-    Base.metadata.create_all(bind=bind or engine)
+    bind = bind or engine
+    Base.metadata.create_all(bind=bind)
+    _add_new_columns(bind)
+
+
+def _add_new_columns(bind: Engine) -> None:
+    """A minimal migration: add columns that are new in the models to existing tables.
+
+    `create_all()` creates missing tables but never changes existing ones, so a database
+    made before a column was added would break. Only nullable columns are added (existing
+    rows get NULL); anything bigger (renames, new constraints) needs a real migration tool.
+    """
+    inspector = inspect(bind)
+    with bind.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            existing = {c["name"] for c in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name not in existing and column.nullable:
+                    kind = column.type.compile(bind.dialect)
+                    conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {kind}'))

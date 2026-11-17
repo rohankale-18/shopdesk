@@ -57,10 +57,15 @@ class StreamEnd:
 
     finish_reason: str | None = None  # "stop" (answered), "tool_calls", "length" (hit max_tokens)...
     reasoning: str = ""  # the model's hidden thinking, if the model streams it (gpt-oss does)
-    usage: dict[str, int] = field(default_factory=dict)  # prompt / completion / reasoning tokens
+    # prompt / completion / reasoning tokens, and Groq's queue / input / output times in ms
+    usage: dict[str, int | None] = field(default_factory=dict)
 
 
-def _usage(raw: Any) -> dict[str, int]:
+def _ms(seconds: Any) -> int | None:
+    return None if seconds is None else round(seconds * 1000)
+
+
+def _usage(raw: Any) -> dict[str, int | None]:
     if raw is None:
         return {}
     details = getattr(raw, "completion_tokens_details", None)
@@ -68,6 +73,11 @@ def _usage(raw: Any) -> dict[str, int]:
         "prompt_tokens": raw.prompt_tokens or 0,
         "completion_tokens": raw.completion_tokens or 0,
         "reasoning_tokens": (details.reasoning_tokens if details else 0) or 0,
+        # Groq's own timings (seconds in the API): waiting for a GPU, reading the input,
+        # writing the output. Our duration_ms also includes the network on top.
+        "queue_ms": _ms(getattr(raw, "queue_time", None)),
+        "input_ms": _ms(getattr(raw, "prompt_time", None)),
+        "output_ms": _ms(getattr(raw, "completion_time", None)),
     }
 
 

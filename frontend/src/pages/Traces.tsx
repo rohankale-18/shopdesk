@@ -1,6 +1,14 @@
 import type { ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { ArrowLeftIcon, BrainIcon, MessageSquareIcon, SparklesIcon, WrenchIcon } from 'lucide-react'
+import {
+  ArrowLeftIcon,
+  BrainIcon,
+  CheckCircle2Icon,
+  MessageSquareIcon,
+  SparklesIcon,
+  TriangleAlertIcon,
+  WrenchIcon,
+} from 'lucide-react'
 
 import { useTrace, useTraces } from '../api/hooks'
 import type { ModelCall, PromptMessage, ToolRun, TraceDetail, TraceStatus } from '../api/types'
@@ -32,7 +40,7 @@ function pretty(value: unknown): string {
   return JSON.stringify(value, null, 2)
 }
 
-function Code({ children, className }: { children: string; className?: string }) {
+function Code({ children, className }: { children: ReactNode; className?: string }) {
   return (
     <pre
       className={cx(
@@ -83,7 +91,10 @@ function TraceList() {
         ) : !q.data?.length ? (
           <Empty>No traces yet. Ask the assistant something, then come back.</Empty>
         ) : (
-          <Table head={['When', 'Question', 'Status', 'Tools', 'Model calls', 'Time', 'First word', 'Tokens']} alignRight={[4, 5, 6, 7]}>
+          <Table
+            head={['When', 'Question', 'Status', 'Tools', 'Model calls', 'Time', 'First word', 'Tokens in', 'Tokens out']}
+            alignRight={[4, 5, 6, 7, 8]}
+          >
             {q.data.map((t) => (
               <tr key={t.id} onClick={() => navigate(`/traces/${t.id}`)} className="cursor-pointer hover:bg-sunken">
                 <Td className="whitespace-nowrap text-muted-foreground">{dateTime(t.started_at)}</Td>
@@ -111,7 +122,10 @@ function TraceList() {
                 <Td className="num whitespace-nowrap text-right">{t.steps}</Td>
                 <Td className="num whitespace-nowrap text-right">{ms(t.duration_ms)}</Td>
                 <Td className="num whitespace-nowrap text-right text-muted-foreground">{ms(t.first_token_ms)}</Td>
-                <Td className="num whitespace-nowrap text-right">{tokens(t.total_tokens)}</Td>
+                <Td className="num whitespace-nowrap text-right">{tokens(t.prompt_tokens)}</Td>
+                <Td className="num whitespace-nowrap text-right">
+                  <span title={`${tokens(t.reasoning_tokens)} of them reasoning`}>{tokens(t.completion_tokens)}</span>
+                </Td>
               </tr>
             ))}
           </Table>
@@ -167,6 +181,98 @@ function TimeBar({ trace }: { trace: TraceDetail }) {
   )
 }
 
+// ---------- tokens ----------
+
+// Chart slots 1 and 2 (index.css).
+const REASONING_COLOR = 'var(--viz-1)'
+const VISIBLE_COLOR = 'var(--viz-2)'
+
+type Segment = { label: string; value: number; color: string; hint?: string }
+
+const pct = (value: number, total: number) => (total ? Math.round((value / total) * 100) : 0)
+
+/** One stacked bar plus its legend (values in the legend, so color is never the only label). */
+function StackedBar({ title, total, segments }: { title: string; total: number; segments: Segment[] }) {
+  const shown = segments.filter((s) => s.value > 0)
+  return (
+    <div>
+      <div className="mb-1.5 flex items-baseline justify-between gap-3 text-[13px]">
+        <span className="font-medium">{title}</span>
+        <span className="num text-muted-foreground">{tokens(total)} tokens</span>
+      </div>
+      <div className="flex h-3 w-full gap-0.5 overflow-hidden rounded-full bg-sunken" role="img" aria-label={`${title} by part`}>
+        {shown.map((s) => (
+          <div
+            key={s.label}
+            title={`${s.label}: ${tokens(s.value)} tokens (${pct(s.value, total)}%)`}
+            className="first:rounded-l-full last:rounded-r-full"
+            style={{ width: `${Math.max(0.5, (s.value / Math.max(total, 1)) * 100)}%`, background: s.color }}
+          />
+        ))}
+      </div>
+      <ul className="mt-2 flex flex-wrap gap-x-5 gap-y-1.5 text-[12.5px]">
+        {segments.map((s) => (
+          <li key={s.label} className="flex items-center gap-1.5" title={s.hint}>
+            <span className="size-2.5 shrink-0 rounded-sm" style={{ background: s.color }} aria-hidden />
+            <span className="text-muted-foreground">{s.label}</span>
+            <span className="num">{tokens(s.value)}</span>
+            <span className="num text-faint">{pct(s.value, total)}%</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+/** Where the tokens went, as Groq reports them: output by kind, then per call with Groq's timings. */
+function TokenBreakdown({ trace }: { trace: TraceDetail }) {
+  const calls = trace.model_calls
+  const visible = trace.completion_tokens - trace.reasoning_tokens
+
+  return (
+    <div className="flex flex-col gap-5">
+      <StackedBar
+        title="Output (written by the model)"
+        total={trace.completion_tokens}
+        segments={[
+          { label: 'Reasoning (hidden)', value: trace.reasoning_tokens, color: REASONING_COLOR },
+          { label: 'Answer and tool requests', value: visible, color: VISIBLE_COLOR },
+        ]}
+      />
+
+      <div>
+        <h3 className="mb-1 text-[13px] font-medium">Per call</h3>
+        <Table
+          head={['Call', 'Input', 'Reasoning', 'Answer and tool requests', 'Output', 'Queue', 'Reading input', 'Writing output', 'Speed']}
+          alignRight={[1, 2, 3, 4, 5, 6, 7, 8]}
+        >
+          {calls.map((c) => (
+            <tr key={c.step} className="border-t border-line">
+              <Td>{c.step}</Td>
+              <Td className="num text-right font-medium">{tokens(c.prompt_tokens)}</Td>
+              <Td className="num text-right text-muted-foreground">{tokens(c.reasoning_tokens)}</Td>
+              <Td className="num text-right text-muted-foreground">{tokens(c.completion_tokens - c.reasoning_tokens)}</Td>
+              <Td className="num text-right font-medium">{tokens(c.completion_tokens)}</Td>
+              <Td className="num whitespace-nowrap text-right text-muted-foreground">{ms(c.queue_ms)}</Td>
+              <Td className="num whitespace-nowrap text-right text-muted-foreground">{ms(c.input_ms)}</Td>
+              <Td className="num whitespace-nowrap text-right text-muted-foreground">{ms(c.output_ms)}</Td>
+              <Td className="num whitespace-nowrap text-right text-muted-foreground">
+                {c.output_ms ? `${Math.round(c.completion_tokens / (c.output_ms / 1000))} tokens/s` : '—'}
+              </Td>
+            </tr>
+          ))}
+        </Table>
+      </div>
+
+      <p className="text-[12.5px] text-muted-foreground">
+        All numbers come from Groq. Queue, reading and writing are Groq's own times; each call's time in the steps below
+        is longer because it includes the network. Groq gives the input as one total; open "Prompt sent" on a call to see
+        what was in it.
+      </p>
+    </div>
+  )
+}
+
 function PromptMessages({ messages, newFrom }: { messages: PromptMessage[]; newFrom: number }) {
   return (
     <ol className="flex flex-col gap-2">
@@ -201,7 +307,18 @@ function PromptMessages({ messages, newFrom }: { messages: PromptMessage[]; newF
   )
 }
 
-function ModelCallCard({ call, previous, runs }: { call: ModelCall; previous?: ModelCall; runs: ToolRun[] }) {
+function ModelCallCard({
+  call,
+  previous,
+  runs,
+  flagged,
+}: {
+  call: ModelCall
+  previous?: ModelCall
+  runs: ToolRun[]
+  /** Numbers to highlight in the answer: not found in any tool result. */
+  flagged: string[]
+}) {
   const askedForTools = call.tool_calls.length > 0
   const sent = call.request.messages
   return (
@@ -260,7 +377,9 @@ function ModelCallCard({ call, previous, runs }: { call: ModelCall; previous?: M
                 <MessageSquareIcon className="size-3.5" /> {askedForTools ? 'Text before the tools' : 'Answer'}
                 {call.first_token_ms !== null && <span className="font-normal">· first word after {ms(call.first_token_ms)}</span>}
               </div>
-              <Code>{call.response_text}</Code>
+              <Code>
+                <Highlighted text={call.response_text} numbers={flagged} />
+              </Code>
             </div>
           )}
         </div>
@@ -307,6 +426,61 @@ function ToolRunCard({ run }: { run: ToolRun }) {
   )
 }
 
+/** Did every number in the answer come from somewhere? Flags the ones that didn't. */
+function GroundingNote({ trace }: { trace: TraceDetail }) {
+  const flagged = trace.unsupported_numbers
+  if (flagged.length === 0) {
+    if (trace.tool_runs.length === 0) return null
+    return (
+      <p className="mb-4 flex items-center gap-2 text-[13px] text-muted-foreground">
+        <CheckCircle2Icon className="size-4 text-st-green" aria-hidden />
+        Every number in the answer appears in a tool result or the conversation.
+      </p>
+    )
+  }
+  return (
+    <div role="note" className="mb-4 rounded-lg border border-st-amber/40 bg-st-amber-wash px-4 py-3 text-[13.5px]">
+      <div className="flex items-center gap-2 font-medium text-st-amber">
+        <TriangleAlertIcon className="size-4" aria-hidden />
+        {flagged.length === 1 ? '1 number' : `${flagged.length} numbers`} in the answer aren't in any tool result
+      </div>
+      <p className="mt-1 text-ink">
+        {flagged.map((n, i) => (
+          <span key={n}>
+            {i > 0 && ', '}
+            <mark className="rounded bg-st-amber/20 px-1 font-mono text-[12.5px] text-ink">{n}</mark>
+          </span>
+        ))}
+      </p>
+      <p className="mt-1 text-[12.5px] text-muted-foreground">
+        The model made these up or worked them out itself (or they're dates written in an unusual way). Check them against
+        the tool results below. They're highlighted in the answer.
+      </p>
+    </div>
+  )
+}
+
+/** Text with the given numbers highlighted (whole numbers only: "9" doesn't match inside "1,904"). */
+function Highlighted({ text, numbers }: { text: string; numbers: string[] }) {
+  if (numbers.length === 0) return <>{text}</>
+  const escaped = numbers.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  const pattern = new RegExp(`(?<![\\d.,])(${escaped.join('|')})(?![\\d]|[.,]\\d)`, 'g')
+  const parts = text.split(pattern)
+  return (
+    <>
+      {parts.map((part, i) =>
+        i % 2 === 1 ? (
+          <mark key={i} className="rounded bg-st-amber/25 px-0.5 text-ink">
+            {part}
+          </mark>
+        ) : (
+          part
+        ),
+      )}
+    </>
+  )
+}
+
 function TraceView({ id }: { id: number }) {
   const q = useTrace(id)
   if (q.isLoading) return <Loading rows={10} />
@@ -341,6 +515,8 @@ function TraceView({ id }: { id: number }) {
         <div className="mt-0.5 text-[15px] whitespace-pre-wrap">{t.question}</div>
       </div>
 
+      <GroundingNote trace={t} />
+
       {t.error && (
         <p role="alert" className="mb-4 rounded-lg bg-danger-wash px-4 py-2.5 text-[13.5px] text-danger">
           {t.error}
@@ -362,8 +538,12 @@ function TraceView({ id }: { id: number }) {
         />
       </div>
 
-      <Panel className="mb-6" title="Where the time went">
+      <Panel className="mb-4" title="Where the time went">
         <TimeBar trace={t} />
+      </Panel>
+
+      <Panel className="mb-6" title="Where the tokens went">
+        <TokenBreakdown trace={t} />
       </Panel>
 
       <h2 className="mb-3 text-[15px] font-semibold">Step by step</h2>
@@ -374,6 +554,7 @@ function TraceView({ id }: { id: number }) {
             call={call}
             previous={t.model_calls[i - 1]}
             runs={t.tool_runs.filter((r) => r.step === call.step)}
+            flagged={t.unsupported_numbers}
           />
         ))}
       </ol>

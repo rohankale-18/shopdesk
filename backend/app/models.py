@@ -360,6 +360,10 @@ class ChatModelCall(Base):
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     reasoning_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    # Groq's own timings: waiting in its queue, reading the input, writing the output
+    queue_ms: Mapped[int | None] = mapped_column(Integer)
+    input_ms: Mapped[int | None] = mapped_column(Integer)
+    output_ms: Mapped[int | None] = mapped_column(Integer)
     duration_ms: Mapped[int] = mapped_column(Integer)
     first_token_ms: Mapped[int | None] = mapped_column(Integer)
 

@@ -64,6 +64,11 @@
   --st-slate: #4f5a6b;
   --st-slate-wash: #e9ecf1;
 
+  /* Chart series (the Traces token breakdown), from a colorblind-checked
+     categorical order: use the slots in order, one per thing on the page. */
+  --viz-1: #2a78d6;
+  --viz-2: #eb6834;
+
   color-scheme: light;
 }
 
@@ -152,6 +157,9 @@
     --st-red-wash: #3a1f1f;
     --st-slate: #aab3c2;
     --st-slate-wash: #262c38;
+
+    --viz-1: #3987e5;
+    --viz-2: #d95926;
 
     color-scheme: dark;
   }

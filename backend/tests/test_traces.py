@@ -1,13 +1,16 @@
 """Traces: every reply records its model calls, tool runs, timings and tokens."""
 
 import pytest
+from sqlalchemy import create_engine, inspect, text
 
 from app.core.errors import UpstreamError
-from app.services import ai
+from app.db import init_db
+from app.services import ai, tools
 
 
 def end(prompt: int, completion: int, reasoning: int, why: str, finish: str) -> ai.StreamEnd:
     usage = {"prompt_tokens": prompt, "completion_tokens": completion, "reasoning_tokens": reasoning}
+    usage |= {"queue_ms": 30, "input_ms": 50, "output_ms": 200}
     return ai.StreamEnd(finish_reason=finish, reasoning=why, usage=usage)
 
 
@@ -38,8 +41,8 @@ def latest_trace(client) -> dict:
 def test_a_reply_with_a_tool_is_traced_in_full(client, script):
     overview = ai.ToolCall(id="c1", name="get_store_overview", arguments="{}")
     script += [
-        [overview, end(900, 40, 30, "They want ticket counts; the overview has them.", "tool_calls")],
-        ["There are ", "N open tickets.", end(1500, 20, 5, "Answer from the result.", "stop")],
+        [overview, end(1400, 40, 30, "They want ticket counts; the overview has them.", "tool_calls")],
+        ["There are ", "N open tickets.", end(1600, 20, 5, "Answer from the result.", "stop")],
     ]
     cid, events = ask(client, "How many open tickets?")
     assert events[-1] == "done"
@@ -48,13 +51,13 @@ def test_a_reply_with_a_tool_is_traced_in_full(client, script):
     assert (trace["status"], trace["error"], trace["steps"], trace["conversation_id"]) == ("ok", None, 2, cid)
     assert trace["question"] == "How many open tickets?"
     # Tokens are summed over both model calls.
-    assert (trace["prompt_tokens"], trace["completion_tokens"], trace["reasoning_tokens"]) == (2400, 60, 35)
-    assert trace["total_tokens"] == 2460
+    assert (trace["prompt_tokens"], trace["completion_tokens"], trace["reasoning_tokens"]) == (3000, 60, 35)
+    assert trace["total_tokens"] == 3060
     assert trace["first_token_ms"] is not None and trace["duration_ms"] >= trace["first_token_ms"]
 
     first, second = trace["model_calls"]
     assert first["request"]["tool_choice"] == "auto"
-    assert first["request"]["tools"] == ["get_store_overview", "get_sales"]
+    assert first["request"]["tools"] == list(tools.TOOLS)
     assert [m["role"] for m in first["request"]["messages"]] == ["system", "user"]
     assert first["tool_calls"] == [{"name": "get_store_overview", "arguments": "{}"}]
     assert (first["finish_reason"], first["reasoning"]) == (
@@ -64,6 +67,9 @@ def test_a_reply_with_a_tool_is_traced_in_full(client, script):
     # The second call was sent the tool request and its result: the prompt grows each pass.
     assert [m["role"] for m in second["request"]["messages"]] == ["system", "user", "assistant", "tool"]
     assert (second["response_text"], second["finish_reason"]) == ("There are N open tickets.", "stop")
+
+    # Groq's own timings are kept per call.
+    assert (first["queue_ms"], first["input_ms"], first["output_ms"]) == (30, 50, 200)
 
     (run,) = trace["tool_runs"]
     assert (run["step"], run["name"], run["is_error"]) == (1, "get_store_overview", False)
@@ -116,3 +122,24 @@ def test_list_is_newest_first_and_deleting_a_conversation_deletes_its_traces(cli
     assert client.get(f"/api/traces/{first_trace}").status_code == 404
     assert client.get("/api/traces").json()[0]["question"] == "second"
     assert client.get("/api/traces/999999").status_code == 404
+
+
+def test_init_db_adds_new_columns_to_an_old_table(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'old.db'}")
+    with engine.begin() as conn:  # chat_model_calls as it was before Groq's timings were saved
+        conn.execute(text("CREATE TABLE chat_model_calls (id INTEGER PRIMARY KEY, step INTEGER)"))
+    init_db(engine)
+    columns = {c["name"] for c in inspect(engine).get_columns("chat_model_calls")}
+    assert {"queue_ms", "input_ms", "output_ms"} <= columns
+    engine.dispose()
+
+
+def test_a_trace_flags_numbers_no_tool_returned(client, script):
+    overview = ai.ToolCall(id="c1", name="get_store_overview", arguments="{}")
+    open_now = client.get("/api/stats/overview").json()["open_tickets"]
+    script += [
+        [overview, end(1400, 40, 30, "Overview has tickets.", "tool_calls")],
+        [f"{open_now} tickets are open, 9876 were resolved last month.", end(1600, 20, 5, "", "stop")],
+    ]
+    ask(client, "How many tickets are open, and how many were resolved last month?")
+    assert latest_trace(client)["unsupported_numbers"] == ["9876"]  # the real count passes
