@@ -263,3 +263,27 @@ def test_two_tools_in_one_turn(client, scripted_model):
     assert "period" in json.loads(results[0]["content"])
     saved = client.get(f"/api/chat/conversations/{cid}").json()["messages"][-1]["tool_calls"]
     assert [t["label"] for t in saved] == tool_events
+
+
+def test_agent_chains_tools_using_an_earlier_result(client, monkeypatch):
+    """Search, then use the id from the search result in the next call (Step 5)."""
+    seen: list[list[dict]] = []
+
+    def model(messages, **_):
+        seen.append(list(messages))
+        if len(seen) == 1:  # call 1: search
+            return iter([ai.ToolCall(id="c1", name="find_customer", arguments='{"query": "priya"}')])
+        if len(seen) == 2:  # call 2: read the id out of the search result, like the model would
+            found = json.loads(messages[-1]["content"])["matches"][0]
+            args = json.dumps({"customer_id": found["id"]})
+            return iter([ai.ToolCall(id="c2", name="list_customer_orders", arguments=args)])
+        return iter(["Priya ordered headphones."])  # call 3: answer
+
+    monkeypatch.setattr(ai, "stream", model)
+    events = send(client, new_chat(client), "What did Priya order?")
+
+    labels = [data["label"] for name, data in events if name == "tool"]
+    assert labels[0] == "Searched customers for “priya”" and labels[1].startswith("Looked up orders")
+    orders = json.loads(seen[2][-1]["content"])
+    assert orders["customer"]["name"] == "Priya Sharma"
+    assert any(o["tickets"] for o in orders["orders"])  # the damaged-headphones ticket comes along

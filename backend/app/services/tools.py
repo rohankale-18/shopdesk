@@ -17,11 +17,11 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
-from app.models import Order, Ticket
+from app.models import Customer, Order, Ticket
 from app.services.stats import sales_totals, store_overview
 
 logger = logging.getLogger("shopdesk.tools")
@@ -213,6 +213,85 @@ def get_order(db: Session, order_number: str) -> dict[str, Any]:
     }
 
 
+CUSTOMER_MATCHES = 5  # enough to choose from; more is noise the model has to read
+ORDERS_SHOWN = 10
+
+
+def find_customer(db: Session, query: str) -> dict[str, Any]:
+    text = str(query).strip()
+    if len(text) < 2:
+        raise ToolError("query needs at least 2 characters of a name or email.")
+    where = or_(Customer.name.ilike(f"%{text}%"), Customer.email.ilike(f"%{text}%"))
+    total = db.scalar(select(func.count()).select_from(Customer).where(where)) or 0
+    order_count = select(func.count()).where(Order.customer_id == Customer.id).scalar_subquery()
+    rows = db.execute(
+        select(Customer, order_count).where(where).order_by(Customer.name).limit(CUSTOMER_MATCHES)
+    ).all()
+    result: dict[str, Any] = {
+        "total_matches": total,
+        "matches": [
+            {
+                "id": c.id,
+                "name": c.name,
+                "email": c.email,
+                "tier": c.tier,
+                "location": ", ".join(p for p in (c.city, c.country) if p),
+                "orders": n,
+            }
+            for c, n in rows
+        ],
+    }
+    # A search that finds nothing, or too much, isn't an error: say what to do next instead.
+    if total == 0:
+        result["next_step"] = f"No customer matches {text!r}. Ask the user for an email or another spelling."
+    elif total > 1:
+        shown = f"the first {len(rows)} of {total}" if total > len(rows) else f"all {total}"
+        result["next_step"] = (
+            f"Several customers match ({shown} shown). Ask the user which one they mean "
+            "(by email or location) before looking up anything else."
+        )
+    return result
+
+
+def list_customer_orders(db: Session, customer_id: Any) -> dict[str, Any]:
+    try:
+        customer = db.get(Customer, int(customer_id))
+    except (TypeError, ValueError):
+        customer = None
+    if customer is None:
+        raise ToolError(f"No customer with id {customer_id!r}. Get the id from find_customer first.")
+    total = db.scalar(select(func.count()).where(Order.customer_id == customer.id)) or 0
+    orders = db.scalars(
+        select(Order)
+        .where(Order.customer_id == customer.id)
+        .order_by(Order.placed_at.desc())
+        .limit(ORDERS_SHOWN)
+    ).all()
+    tickets: dict[int, list[dict[str, Any]]] = {}
+    for t in db.scalars(
+        select(Ticket).where(Ticket.order_id.in_([o.id for o in orders])).order_by(Ticket.id)
+    ):
+        tickets.setdefault(t.order_id, []).append({"id": t.id, "subject": t.subject, "status": t.status})
+    today = datetime.now(UTC).date()
+    return {
+        "customer": {"id": customer.id, "name": customer.name},
+        "total_orders": total,
+        "showing": f"newest {len(orders)}" if total > len(orders) else f"all {total}",
+        "orders": [
+            {
+                "number": o.number,
+                "status": o.status,
+                "placed": _day(o.placed_at, today),
+                "items": sum(i.quantity for i in o.items),
+                "total_usd": _usd(o.total_cents),
+                "refunded_usd": _usd(o.refunded_cents),
+                "tickets": tickets.get(o.id, []),
+            }
+            for o in orders
+        ],
+    }
+
+
 # ---------- the registry ----------
 
 
@@ -311,6 +390,45 @@ TOOLS = {
                 "required": ["order_number"],
             },
             run=get_order,
+        ),
+        Tool(
+            name="find_customer",
+            label=lambda a: f"Searched customers for “{a['query']}”",
+            description=(
+                "Search customers by part of their name or email. Returns up to 5 matches with "
+                "their id, email, tier, location and number of orders. Use it first whenever the "
+                "user names a customer, then pass the id to other tools (e.g. list_customer_orders). "
+                "If several customers match, ask the user which one they mean; don't pick one."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Name or email, or part of one, e.g. 'priya'."}
+                },
+                "required": ["query"],
+            },
+            run=find_customer,
+        ),
+        Tool(
+            name="list_customer_orders",
+            label=lambda a: f"Looked up orders of customer {a['customer_id']}",
+            description=(
+                "A customer's orders, newest first (up to 10): number, status, date placed (with days "
+                "ago), item count, total, amount refunded, and any support tickets about each order. "
+                "Also the customer's total order count. Needs the customer id from find_customer. "
+                "For full details of one order (items, tracking), use get_order."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "customer_id": {
+                        "type": "integer",
+                        "description": "The customer's id, from find_customer.",
+                    }
+                },
+                "required": ["customer_id"],
+            },
+            run=list_customer_orders,
         ),
     ]
 }

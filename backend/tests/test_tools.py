@@ -4,7 +4,7 @@ import json
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.db import SessionLocal
 from app.models import Order, OrderStatus, Refund
@@ -164,3 +164,62 @@ def test_get_order_problems_go_back_to_the_model(client, given, message):
 
 def test_get_order_label():
     assert tools.label("get_order", '{"order_number": "ORD-00000002"}') == "Looked up order ORD-00000002"
+
+
+# ---------- find_customer, list_customer_orders ----------
+
+
+def test_find_customer_by_name_or_email(client):
+    by_name = run("find_customer", query="Priya Sharma")
+    by_email = run("find_customer", query="PRIYA.SHARMA@example")  # partial, any case
+    assert by_name["total_matches"] == 1 and "next_step" not in by_name
+    assert by_name["matches"] == by_email["matches"]
+    (priya,) = by_name["matches"]
+    assert (priya["email"], priya["location"], priya["tier"]) == (
+        "priya.sharma@example.com",
+        "Pune, India",
+        "gold",
+    )
+    assert priya["orders"] >= 1
+
+
+def test_several_matches_ask_the_user_to_choose(client):
+    result = run("find_customer", query=".com")  # every email matches
+    assert result["total_matches"] > tools.CUSTOMER_MATCHES == len(result["matches"])
+    assert "Ask the user which one" in result["next_step"]
+    assert f"first {tools.CUSTOMER_MATCHES} of {result['total_matches']}" in result["next_step"]
+
+
+def test_no_match_is_a_result_not_an_error(client):
+    result = run("find_customer", query="Zebediah Q")
+    assert (result["total_matches"], result["matches"]) == (0, [])
+    assert "another spelling" in result["next_step"]
+    assert "error" in run("find_customer", query=" a ")  # too short to search
+
+
+def test_list_customer_orders_newest_first_with_tickets(client):
+    marcus = run("find_customer", query="marcus.lee")["matches"][0]
+    result = run("list_customer_orders", customer_id=marcus["id"])
+    assert result["customer"] == {"id": marcus["id"], "name": "Marcus Lee"}
+    assert result["total_orders"] == marcus["orders"] == len(result["orders"])
+    placed = [o["placed"]["on"] for o in result["orders"]]
+    assert placed == sorted(placed, reverse=True)
+    late = next(o for o in result["orders"] if o["number"] == "ORD-00000002")
+    assert late["tickets"][0]["subject"] == "Still waiting for my lamp"
+
+
+def test_list_customer_orders_is_capped(client, monkeypatch):
+    with SessionLocal() as db:  # the customer with the most orders
+        busiest = db.execute(
+            select(Order.customer_id, func.count()).group_by(Order.customer_id).order_by(func.count().desc())
+        ).first()
+    monkeypatch.setattr(tools, "ORDERS_SHOWN", 1)
+    result = run("list_customer_orders", customer_id=busiest[0])
+    assert len(result["orders"]) == 1 and result["total_orders"] == busiest[1]
+    assert result["showing"] == "newest 1"
+
+
+@pytest.mark.parametrize("customer_id", [999999, "abc", None])
+def test_unknown_customer_id_goes_back_as_an_error(client, customer_id):
+    result = run("list_customer_orders", customer_id=customer_id)
+    assert "find_customer first" in result["error"]

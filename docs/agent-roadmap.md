@@ -11,12 +11,13 @@ The support assistant learns one capability at a time. Each step adds **one new 
 | 2 | Sales for any period | `get_sales` | Arguments the model works out (dates), combining tool results | ✅ |
 | 3 | Tracing | none | See every model call, tool run, token and millisecond behind a reply | ✅ |
 | 4 | Look up by ID | `get_order` | Arguments, errors as data, output size | ✅ |
-| 5 | Search, then chain | `find_customer`, `list_customer_orders` | Multi-step reasoning, ambiguity, limits | ⬜ |
+| 5 | Search, then chain | `find_customer`, `list_customer_orders` | Multi-step reasoning, ambiguity, limits | ✅ |
 | 6 | Tickets | `get_ticket`, `list_tickets` | Summarizing real data, page context | ⬜ |
 | 7 | Products and stock | `search_products` | Grounding: never invent facts | ⬜ |
 | 8 | Analytics and charts | `sales_by_day`, `top_products` | Structured output rendered as charts | ⬜ |
 | 9 | Actions with approval | `draft_ticket_reply`, `create_refund`, `cancel_order` | Human in the loop, backend-enforced rules | ⬜ |
 | 10 | Evals | none | Measuring whether a change made the agent better | ⬜ |
+| 11 | Flexible queries | `query_orders` (and maybe `run_sql`) | One tool for many questions: a structured query the code turns into SQL | ⬜ |
 
 ---
 
@@ -246,9 +247,11 @@ Already in place before the agent work starts.
 
 ---
 
-## Step 5: Search, then chain ⬜
+## Step 5: Search, then chain ✅
 
-**Tools:** `find_customer(query)`, `list_customer_orders(customer_id)`
+**Tools:**
+- `find_customer(query)`: up to 5 matches by part of a name or email, each with id, email, tier, location and order count.
+- `list_customer_orders(customer_id)`: the newest 10 orders, each with status, date placed (with days ago), item count, total, amount refunded and its tickets, plus the customer's total order count.
 
 **What you learn**
 - **Multi-step reasoning:** "What did Priya order?" means finding the customer first, then their orders.
@@ -256,16 +259,30 @@ Already in place before the agent work starts.
 - **Limits:** cap results, and cap loop steps so a confused model can't run forever.
 
 **Tasks**
-- [ ] `find_customer` (name or email, limited results)
-- [ ] `list_customer_orders` (newest first, limited results)
-- [ ] Tests for chaining and for several matches
+- [x] `find_customer` (name or email, any case, partial; at most 5 matches, plus the total)
+- [x] `list_customer_orders` (newest first, at most 10, plus the total and "showing newest 10 of N")
+- [x] Search outcomes:
+  - **No match** is a result, not an error. A search that finds nothing is a valid answer. The result includes `next_step` ("ask for an email or another spelling").
+  - **Several matches** also get a `next_step`: ask the user which one, and don't pick.
+  - **An unknown customer id** is an error ("get the id from find_customer first"), because the model can fix it.
+- [x] Loop cap: `MAX_STEPS = 5` from Step 1 already covers this. A search-then-list question uses 3 calls.
+- [x] Tests:
+  - `tests/test_tools.py`: by name or email, several matches, no match, too short, newest first, cap, bad ids
+  - `tests/test_chat.py`: a fake model that reads the id out of the search result and passes it on, which is the chain itself
 
-**Test questions**
-- "What did priya.sharma@example.com order recently?"
-- "Find customer James" (could match more than one)
-- "Has Marcus Lee had any problems with his orders?"
+**Test questions** (tried against the real model, after a reseed)
+- "What did priya.sharma@example.com order recently?": `find_customer`, then `list_customer_orders(1)`. Her latest order, with the open cracked-headband ticket.
+- "Has Marcus Lee had any problems with his orders?": the open "Still waiting for my lamp" ticket on ORD-00000002, and his other orders have none.
+- "What did Priya order?": the same chain, with 5 orders in a table.
+- "What has Mark ordered?": three Marks found, so it asked which one by email. Then "the first one" worked.
+- "Find customer Zebediah": no match, so it asked for an email or another spelling.
+- The grounding check flagged nothing on any of them.
 
 **Notes / what I learned**
+- (observed) **The chain works without being told how.** Each tool description says what it needs and where to get it ("needs the customer id from find_customer"), and the model strings the calls together itself: search, read the id, list, answer. No prompt changes were needed.
+- (observed) **`next_step` in a result steers the model at the moment it matters.** With three Marks, it asked instead of guessing. Putting the instruction in the result means it only shows up when it applies.
+- (observed) **Follow-ups repeat lookups.** After "the first one", the model ran `find_customer("Mark")` again before listing orders. Old tool results aren't replayed in later turns (a Step 1 decision), so the earlier ids weren't in its context. It cost one extra call. The alternative is keeping ids in the answer text, or replaying results, which grows every prompt.
+- (observed) **Rate limits look like slow calls.** Some replies took 30–40 s, while Groq's own time per call was under 1 s. The server log showed `429 Too Many Requests`, and the Groq SDK quietly waited up to 16 s before retrying. A search-then-list question uses about 6,000 tokens, so a few in a row hit the plan's tokens-per-minute limit. The trace doesn't show the retries yet. A hint would be "call time minus Groq's own time = waiting", or logging retries.
 -
 
 ---
@@ -324,6 +341,7 @@ Already in place before the agent work starts.
 - [ ] Analytics tools that return compact data
 - [ ] Chart block format, documented in the system prompt
 - [ ] Render chart blocks in `frontend/src/components/chat/ChatMarkdown.tsx`
+- [ ] Check against Step 11 first: if `query_orders` will cover "by day" and "top N", build just enough here for the charts, and avoid two tools that answer the same question.
 
 **Test questions**
 - "Show revenue for the last 30 days as a chart."
@@ -370,12 +388,52 @@ Already in place before the agent work starts.
 - [ ] Re-run after every prompt or tool change, and record the results below
 - [ ] Regression cases from real failures:
   - "compare order values in September vs October", then "compare all the values". Pass: no grounding flags, and the change is reported as October vs September with revenue up.
+  - "highest order value this year in each month". Until Step 11: pass if it says no tool can answer and invents nothing. After Step 11: one call, every month's largest order, no grounding flags.
 
 **Results log**
 
 | Date | Change | Scenarios passed | Notes |
 |---|---|---|---|
 | | | | |
+
+---
+
+## Step 11: Flexible queries ⬜
+
+**Tools:** `query_orders` (structured), and optionally `run_sql` (raw, read-only) as an experiment
+
+**Why:** one tool per question doesn't scale. "Highest order value this year in each month" failed because no tool could see individual orders across the store: `get_sales` only returns totals, and `get_order` / `list_customer_orders` need a number or a customer first. The model honestly said it couldn't answer, which was correct, but every new kind of question would otherwise need a new tool.
+
+**What you learn**
+- **Three ways to answer data questions:**
+  - fixed tools (Steps 1–7): exact, but narrow;
+  - a structured query, where the model fills in fields and the code writes the SQL: wide and still safe;
+  - text-to-SQL, where the model writes the SQL: widest, but riskiest.
+- **A semantic layer:** business terms ("revenue", "order value", "month") are defined once in code, so every answer uses the same rules (cancelled orders excluded, cents to dollars, which timezone a month is in). This is how BI tools like Looker and Cube work.
+- **Quietly wrong answers:** SQL that runs and returns a number, but the wrong one (cancelled orders included, refunds counted twice by a join). The grounding check can't catch these, since the number did come from a tool. Only evals can.
+
+**Tasks**
+- [ ] `query_orders(metric, group_by?, filters?, start_date, end_date, sort?, limit?)`, built from whitelists:
+  - metrics: `count`, `revenue`, `average_order_value`, `max_order_value`, `refunded`, …
+  - group by: `day`, `week`, `month`, `status`, `customer_tier`, `country`, `product`, …
+  - The code builds the query with SQLAlchemy, reusing the rules in `stats.py`. Each new field is one line in a whitelist, not a new tool.
+- [ ] Return the order behind each `max`/`min` (number, customer, value), so the model can name it and follow up with `get_order`
+- [ ] Row cap and a `total_rows` field, same as the other list tools
+- [ ] Overlap: decide what `get_sales` and the Step 8 tools still do once this exists, and update the descriptions
+- [ ] Optional experiment, `run_sql`, behind a setting:
+  - read-only connection (`PRAGMA query_only`), `SELECT` only, row limit and timeout
+  - no customer email or address columns in the schema it's shown
+  - run the Step 10 evals against both `run_sql` and `query_orders` and compare where it gets things quietly wrong
+- [ ] Tests: each metric and group-by against hand-counted totals, unknown fields go back as `ToolError`
+
+**Test questions**
+- "Highest order value this year in each month."
+- "Revenue by customer tier last quarter."
+- "Our 5 biggest orders last week, and who placed them?" (then a follow-up with `get_order`)
+- "How many orders were cancelled each week in October?"
+
+**Notes / what I learned**
+-
 
 ---
 
