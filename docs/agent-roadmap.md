@@ -13,7 +13,7 @@ The support assistant learns one capability at a time. Each step adds **one new 
 | 4 | Look up by ID | `get_order` | Arguments, errors as data, output size | ✅ |
 | 5 | Search, then chain | `find_customer`, `list_customer_orders` | Multi-step reasoning, ambiguity, limits | ✅ |
 | 6 | Tickets | `get_ticket`, `list_tickets` | Summarizing real data, page context | ✅ |
-| 7 | Products and stock | `search_products` | Grounding: never invent facts | ⬜ |
+| 7 | Products and stock | `search_products` | Grounding: never invent facts | ✅ |
 | 8 | Analytics and charts | `sales_by_day`, `top_products` | Structured output rendered as charts | ⬜ |
 | 9 | Actions with approval | `draft_ticket_reply`, `create_refund`, `cancel_order` | Human in the loop, backend-enforced rules | ⬜ |
 | 10 | Evals | none | Measuring whether a change made the agent better | ⬜ |
@@ -351,23 +351,44 @@ Already in place before the agent work starts.
 
 ---
 
-## Step 7: Products and stock ⬜
+## Step 7: Products and stock ✅
 
-**Tool:** `search_products(query)`
+**Tool:** `search_products(query?, category?, stock?)` finds products by name, SKU, category or stock level. It returns price, stock, `stock_status` and description, at most 10, with the total.
 
 **What you learn**
-- **Grounding:** the out-of-stock scenario. Stock is 0, and the agent must say so without inventing a restock date. This tests whether the prompt and tools together stop the model from making things up.
+- **Inventing facts without numbers:** a restock date, a product feature, a product that doesn't exist, a store service that doesn't exist. The grounding check can't see any of these, so the tool and the prompt have to prevent them.
+- **What the data doesn't record has to be said out loud.** A gap the model isn't told about is a gap it fills.
 
 **Tasks**
-- [ ] `search_products` (name, category, stock, price)
-- [ ] System prompt rule about unknown facts (restock dates, delivery promises)
+- [x] One stock rule in `stats.py`, used by the dashboard and the tools:
+  - `LOW_STOCK = 5`;
+  - `stock_status()` returns `not_for_sale`, `out_of_stock`, `low` (1–5 left) or `in_stock`.
+- [x] `search_products`:
+  - `stock` filter: `available`, `out_of_stock`, `low` or `in_stock`;
+  - with a stock filter, fewest left first;
+  - every result includes `not_recorded`: no restock dates, incoming stock, suppliers, specs beyond the description, back-in-stock alerts or waiting lists;
+  - a search with no match says not to repeat it.
+- [x] `get_store_overview`'s low-stock list gets `stock_status` too, and its description points to `search_products`.
+- [x] Prompt:
+  - unrecorded facts: say ShopDesk doesn't have them, never "usually" or "typically";
+  - "low stock" added to the terms;
+  - drafts mention only products a tool returned, and offer no services the data doesn't show;
+  - a "does the lamp have a dimmer?" example that is in scope.
+- [x] UI: a chat opened from a ticket with no order offers "Other tickets" instead of "Check the order", and doesn't mention an order in its subtitle. Found while testing in the browser with the Playwright MCP.
+- [x] Tests: search by name or SKU, the low-stock rule matching the overview and the prompt, `available` = `low` + `in_stock`, not-for-sale products, category, no match, bad filters, labels.
 
-**Test questions**
-- "Is product SCN-0003 in stock? When will it be back?" (the agent must not promise a date)
-- "Which products are running low?"
+**Test questions** (tried against the real model)
+- "Is the Grip Pro Yoga Mat in stock? When will it be back?": "out of stock (0)… ShopDesk does not record restock dates." No date given.
+- "Which products are running low?": `stock="low"`, all 10, fewest first.
+- "Does the Halo Desk Lamp have a dimmer?": "the description doesn't say". It still adds a line like "I can help with any order, ticket…", which is harmless but unneeded.
+- From ticket #5 (the yoga mat): "Suggest a reply". The final version, 3 runs out of 3, suggests the real in-stock alternative (Foldable Yoga Mat, $30.99) and gives no restock date.
 
 **Notes / what I learned**
--
+- (observed) **The first draft invented a product and a feature.** It suggested a "Comfort Grip Mat" (no tool had returned it) and "sign up for a back-in-stock alert on the product page" (no such thing). It also promised to "keep an eye on the inventory". The model had only searched for the yoga mat. Fix: drafts mention only products a tool returned, and look up alternatives first.
+- (observed) **Groq checks tool arguments against the schema before we see them.** The model sent `category: "sports"` where the schema said array. Groq aborted the whole reply with an error, so the user saw "Something went wrong", and our `ToolError` handling never ran. A schema mismatch is a hard failure, not a mistake the model can fix. Fix: `category` became a single value, the shape the model reached for. `list_tickets` still uses arrays (the model has sent those correctly so far); watch for the same error there.
+- (observed) **A filter with the wrong meaning made the model loop.** To find alternatives it asked for `stock="in_stock"`, which means more than 5 left. That excluded the only other mat (2 left). It then repeated nearly the same search 4 times and hit `MAX_STEPS` (5 calls, 17,500 tokens). Fixes: an `available` filter (anything that can be bought now), and a no-match result that says not to repeat the search. After that: 3 calls, about 10,500 tokens, and the real alternative found.
+- (observed) **Stating the gap in the tool result beat a prompt rule, again.** With only the prompt rule ("don't offer services the data doesn't show"), one draft still offered "a notification list". Its own checklist even mentioned the `[offer, if any]` placeholder. Once `not_recorded` said "no back-in-stock alerts or waiting lists", none of 3 runs offered it. Same lesson as `change_means` and `next_step`.
+- (observed) **Small inventions remain:** "It's a popular option" (2 of 3 runs) and "reserve one" (1 of 3). These are mild, and Step 6 had the same kind ("I'm checking with the carrier"). Catching them reliably needs evals (Step 10), probably with a model grading the draft against the tool results.
 
 ---
 
@@ -429,6 +450,7 @@ Already in place before the agent work starts.
 - [ ] Re-run after every prompt or tool change, and record the results below
 - [ ] Regression cases from real failures:
   - "compare order values in September vs October", then "compare all the values". Pass: no grounding flags, and the change is reported as October vs September with revenue up.
+  - From ticket #5 (the yoga mat): "Suggest a reply". Pass: no restock date, no alerts or waiting lists, and alternatives only from a `search_products` result.
   - "highest order value this year in each month". Until Step 11: pass if it says no tool can answer and invents nothing. After Step 11: one call, every month's largest order, no grounding flags.
 
 **Results log**

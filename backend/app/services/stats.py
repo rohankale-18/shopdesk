@@ -9,6 +9,18 @@ from sqlalchemy.orm import Session
 from app.models import Customer, Order, OrderStatus, Product, Refund, Ticket, TicketStatus
 from app.schemas import DailyRevenue, ProductOut, StatsOverview
 
+# One definition of "low stock" for the dashboard and the assistant: 1 to LOW_STOCK left.
+LOW_STOCK = 5
+
+
+def stock_status(product: Product) -> str:
+    """'not_for_sale', 'out_of_stock', 'low' or 'in_stock'."""
+    if not product.is_active:
+        return "not_for_sale"
+    if product.stock == 0:
+        return "out_of_stock"
+    return "low" if product.stock <= LOW_STOCK else "in_stock"
+
 
 def store_overview(db: Session) -> StatsOverview:
     """Headline numbers for the dashboard (and the assistant's get_store_overview tool)."""
@@ -44,7 +56,7 @@ def store_overview(db: Session) -> StatsOverview:
 
     low_stock = db.scalars(
         select(Product)
-        .where(Product.is_active.is_(True), Product.stock <= 5)
+        .where(Product.is_active.is_(True), Product.stock <= LOW_STOCK)
         .order_by(Product.stock.asc(), Product.name.asc())
         .limit(8)
     ).all()

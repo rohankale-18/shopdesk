@@ -7,8 +7,10 @@ import pytest
 from sqlalchemy import func, select
 
 from app.db import SessionLocal
-from app.models import Order, OrderStatus, Refund, Ticket
+from app.models import Order, OrderStatus, Product, Refund, Ticket
 from app.services import tools
+from app.services.chat import SYSTEM_PROMPT
+from app.services.stats import LOW_STOCK
 
 PERIOD = ("2026-05-01", "2026-05-31")  # inside the seeded data (anchor date 2026-06-01)
 
@@ -308,3 +310,81 @@ def test_ticket_labels():
     assert tools.label("list_tickets") == "Looked up tickets (open, pending)"
     args = {"status": ["open"], "priority": ["urgent", "high"]}
     assert tools.label("list_tickets", json.dumps(args)) == "Looked up tickets (open; urgent, high)"
+
+
+# ---------- search_products ----------
+
+
+def test_search_products_by_name_or_sku(client):
+    by_name = run("search_products", query="yoga mat")
+    by_sku = run("search_products", query="scn-0003")
+    assert by_name["products"][0] == by_sku["products"][0]
+    mat = by_sku["products"][0]
+    assert (mat["name"], mat["stock"], mat["stock_status"]) == ("Grip Pro Yoga Mat", 0, "out_of_stock")
+    assert "restock dates" in by_sku["not_recorded"]  # the gap is stated, not left for the model to fill
+
+
+def test_running_low_means_1_to_5_left_and_for_sale(client):
+    low = run("search_products", stock="low")
+    with SessionLocal() as db:
+        expected = db.scalar(
+            select(func.count())
+            .select_from(Product)
+            .where(Product.stock.between(1, LOW_STOCK), Product.is_active.is_(True))
+        )
+    assert low["total_matches"] == expected
+    assert all(p["stock_status"] == "low" for p in low["products"])
+    stocks = [p["stock"] for p in low["products"]]
+    assert stocks == sorted(stocks)  # fewest left first
+    sold_out = run("search_products", stock="out_of_stock")
+    assert "Grip Pro Yoga Mat" in [p["name"] for p in sold_out["products"]]
+
+
+def test_overview_and_search_agree_on_low_stock(client):
+    overview = run("get_store_overview")["low_stock_products"]
+    assert {p["stock_status"] for p in overview} <= {"low", "out_of_stock"}
+    assert all(p["stock"] <= LOW_STOCK for p in overview)
+    assert f"1 to {LOW_STOCK} left" in SYSTEM_PROMPT  # the prompt's definition matches the code
+
+
+def test_products_not_for_sale_are_marked(client):
+    with SessionLocal() as db:
+        lamp = db.scalar(select(Product).where(Product.sku == "SCN-0002"))
+        lamp.is_active = False
+        db.commit()
+    (lamp,) = run("search_products", query="Halo Desk Lamp")["products"]
+    assert lamp["stock_status"] == "not_for_sale"
+
+
+def test_search_products_by_category_and_no_match(client):
+    sports = run("search_products", category="sports")
+    assert sports["products"] and {p["category"] for p in sports["products"]} == {"sports"}
+    nothing = run("search_products", query="hovercraft")
+    assert nothing["total_matches"] == 0 and "Don't repeat the search" in nothing["next_step"]
+
+
+def test_available_includes_low_stock(client):
+    """Alternatives to suggest: anything that can be bought now, even with only a few left."""
+    available = run("search_products", stock="available", category="sports")
+    assert all(p["stock"] > 0 and p["stock_status"] in ("low", "in_stock") for p in available["products"])
+    low = run("search_products", stock="low", category="sports")
+    in_stock = run("search_products", stock="in_stock", category="sports")
+    assert available["total_matches"] == low["total_matches"] + in_stock["total_matches"]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({"stock": "sold out"}, "stock can only be available, out_of_stock, low, in_stock"),
+        ({"category": "toys"}, "category can only be"),
+        ({"query": "x"}, "at least 2 characters"),
+    ],
+)
+def test_bad_product_filters_go_back_to_the_model(client, arguments, message):
+    assert message in run("search_products", **arguments)["error"]
+
+
+def test_product_labels():
+    assert tools.label("search_products", '{"query": "mat"}') == "Searched products for “mat”"
+    assert tools.label("search_products", '{"stock": "out_of_stock"}') == "Looked up products (out of stock)"
+    assert tools.label("search_products") == "Looked up products"

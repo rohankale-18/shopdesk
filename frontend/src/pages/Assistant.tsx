@@ -37,6 +37,12 @@ const TICKET_SUGGESTIONS = [
   { title: 'Check the order', prompt: 'Is there a problem with the order?' },
   { title: 'Next step', prompt: 'What should I do next on this ticket?' },
 ]
+// Instead of "Check the order" when the ticket isn't about an order.
+const NO_ORDER_SUGGESTION = { title: 'Other tickets', prompt: 'Has this customer had any other tickets?' }
+
+function ticketSuggestions(hasOrder: boolean) {
+  return TICKET_SUGGESTIONS.map((s) => (s.title === 'Check the order' && !hasOrder ? NO_ORDER_SUGGESTION : s))
+}
 
 /**
  * The ticket a chat is about. Above the composer while it's waiting to be sent (removable), then
@@ -152,6 +158,7 @@ export default function Assistant() {
   // The ticket a new chat will be about (?ticket=12), or the one an existing chat is about.
   const newChatTicket = activeId ? null : Number(searchParams.get('ticket')) || null
   const ticketId = activeId ? (convo.data?.ticket_id ?? null) : newChatTicket
+  const pendingTicket = useTicket(newChatTicket ?? 0, newChatTicket !== null) // shared cache with the bar
   const messages = convo.data?.messages ?? []
   const aiOff = status.data?.enabled === false
   const busy = turn !== null && turn.savedId === undefined
@@ -373,14 +380,16 @@ export default function Assistant() {
                   </h2>
                   <p className="mt-2 text-[14px] text-muted-foreground">
                     {newChatTicket
-                      ? 'The ticket, its messages and its order go with every question.'
+                      ? pendingTicket.data?.order_id
+                        ? 'The ticket, its messages and its order go with every question.'
+                        : 'The ticket and its messages go with every question.'
                       : 'Draft replies, handle tricky cases, or ask how the store is doing.'}
                   </p>
                 </div>
                 {notices}
                 {composer}
                 <div className="mt-4 grid gap-2 sm:grid-cols-2">
-                  {(newChatTicket ? TICKET_SUGGESTIONS : SUGGESTIONS).map((s) => (
+                  {(newChatTicket ? ticketSuggestions(!!pendingTicket.data?.order_id) : SUGGESTIONS).map((s) => (
                     <button
                       key={s.title}
                       type="button"

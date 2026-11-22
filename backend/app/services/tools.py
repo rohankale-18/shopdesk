@@ -25,12 +25,14 @@ from app.models import (
     Customer,
     MessageAuthor,
     Order,
+    Product,
+    ProductCategory,
     Ticket,
     TicketCategory,
     TicketPriority,
     TicketStatus,
 )
-from app.services.stats import sales_totals, store_overview
+from app.services.stats import LOW_STOCK, sales_totals, stock_status, store_overview
 
 logger = logging.getLogger("shopdesk.tools")
 
@@ -115,7 +117,13 @@ def get_store_overview(db: Session) -> dict[str, Any]:
             "by_status": o.tickets_by_status,
         },
         "low_stock_products": [
-            {"sku": p.sku, "name": p.name, "stock": p.stock} for p in o.low_stock_products
+            {
+                "sku": p.sku,
+                "name": p.name,
+                "stock": p.stock,
+                "stock_status": "out_of_stock" if p.stock == 0 else "low",
+            }
+            for p in o.low_stock_products
         ],
     }
 
@@ -437,6 +445,77 @@ def list_tickets(
     }
 
 
+PRODUCTS_SHOWN = 10
+STOCK_FILTERS = {
+    # "available" = can be bought now. The model looked for alternatives with "in_stock" (more than
+    # LOW_STOCK left), missed a mat with 2 left, and kept repeating the search.
+    "available": Product.stock > 0,
+    "out_of_stock": Product.stock == 0,
+    "low": Product.stock.between(1, LOW_STOCK),
+    "in_stock": Product.stock > LOW_STOCK,
+}
+# Said in every result: what's missing is spelled out, so the model doesn't fill the gap itself.
+NOT_RECORDED = (
+    "ShopDesk doesn't record restock dates, incoming stock, suppliers or product details beyond the "
+    "description, and has no back-in-stock alerts or waiting lists. If asked, say so; don't estimate "
+    "or offer them."
+)
+
+
+def search_products(
+    db: Session, query: Any = None, category: Any = None, stock: Any = None
+) -> dict[str, Any]:
+    text = str(query or "").strip()
+    if query is not None and len(text) < 2:
+        raise ToolError("query needs at least 2 characters of a product name or SKU.")
+    categories = _enum_values(category, ProductCategory, "category")
+    if stock is not None and stock not in STOCK_FILTERS:
+        raise ToolError(f"stock can only be {', '.join(STOCK_FILTERS)}; got {stock!r}.")
+
+    where = []
+    if text:
+        where.append(or_(Product.name.ilike(f"%{text}%"), Product.sku.ilike(f"%{text}%")))
+    if categories:
+        where.append(Product.category.in_(categories))
+    if stock:  # stock questions are about what's for sale
+        where += [STOCK_FILTERS[stock], Product.is_active.is_(True)]
+    total = db.scalar(select(func.count()).select_from(Product).where(*where)) or 0
+    order = (Product.stock, Product.name) if stock else (Product.name,)  # fewest left first
+    products = db.scalars(select(Product).where(*where).order_by(*order).limit(PRODUCTS_SHOWN)).all()
+    result: dict[str, Any] = {
+        "total_matches": total,
+        "showing": f"first {len(products)}" if total > len(products) else f"all {total}",
+        "products": [
+            {
+                "sku": p.sku,
+                "name": p.name,
+                "category": p.category,
+                "price_usd": _usd(p.price_cents),
+                "stock": p.stock,
+                "stock_status": stock_status(p),
+                "description": p.description,
+            }
+            for p in products
+        ],
+        "not_recorded": NOT_RECORDED,
+    }
+    if total == 0:
+        # Said outright: after an empty search the model kept repeating it with small changes.
+        result["next_step"] = (
+            "No product matches these filters. Don't repeat the search with small changes: tell the "
+            "user nothing matched, or ask for another name or the SKU."
+        )
+    return result
+
+
+def _products_label(a: dict[str, Any]) -> str:
+    if a.get("query"):
+        return f"Searched products for “{a['query']}”"
+    filters = [a.get("stock"), a.get("category")]
+    text = "; ".join(", ".join(f) if isinstance(f, list) else str(f).replace("_", " ") for f in filters if f)
+    return f"Looked up products ({text})" if text else "Looked up products"
+
+
 def _tickets_label(a: dict[str, Any]) -> str:
     filters = [a.get("status") or "open, pending", a.get("priority"), a.get("category")]
     text = "; ".join(", ".join(f) if isinstance(f, list) else str(f) for f in filters if f)
@@ -484,8 +563,8 @@ TOOLS = {
                 "(before refunds). Right now: open tickets and tickets by status, low-stock products. "
                 "Use it for questions like 'How are we doing?' or 'How many open tickets are there?'. "
                 "For sales in a specific period (last week, last 10 days, a month...), use get_sales. "
-                "It has no details about individual orders (use get_order), customers or tickets "
-                "(use list_tickets or get_ticket)."
+                "It has no details about individual orders (use get_order), customers, tickets "
+                "(use list_tickets or get_ticket) or products (use search_products)."
             ),
             parameters=NO_ARGUMENTS,
             run=get_store_overview,
@@ -637,6 +716,39 @@ TOOLS = {
                 },
             },
             run=list_tickets,
+        ),
+        Tool(
+            name="search_products",
+            label=_products_label,
+            description=(
+                "Find products by part of their name or SKU, by category, or by stock level. Returns up "
+                f"to {PRODUCTS_SHOWN} products (SKU, name, category, price, stock, stock_status, "
+                "description) and the total that match. stock_status is 'in_stock', 'low' "
+                f"(1 to {LOW_STOCK} left), 'out_of_stock' or 'not_for_sale'. Use it for 'is X in "
+                "stock?', 'what does X cost?', 'which products are running low?' (stock='low') or "
+                "'what's sold out?' (stock='out_of_stock'), or alternatives that can be bought now "
+                "(stock='available'). The description is everything ShopDesk "
+                "knows about a product: there are no restock dates or other specs."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Optional: name or SKU, or part of one."},
+                    # A single value: the model sent "sports" where an array was expected, and Groq
+                    # rejects arguments that don't match the schema before we ever see them.
+                    "category": {
+                        "type": "string",
+                        "enum": [c.value for c in ProductCategory],
+                        "description": "Optional.",
+                    },
+                    "stock": {
+                        "type": "string",
+                        "enum": list(STOCK_FILTERS),
+                        "description": "Optional: only products for sale with this stock level.",
+                    },
+                },
+            },
+            run=search_products,
         ),
     ]
 }

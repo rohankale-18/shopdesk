@@ -178,6 +178,26 @@ Each entry covers:
 
 ---
 
+## 2026-11-22 · Products and stock (Step 7)
+
+**Done:**
+- **`search_products`:** by name, SKU, category or stock (`available`, `low`, `out_of_stock`, `in_stock`).
+- **One "low stock" rule** (1–5 left) in `stats.py`, shared by the dashboard and the tools.
+- **Every result says what ShopDesk doesn't record** (`not_recorded`): restock dates, suppliers, specs, back-in-stock alerts.
+- **Prompt rules:** unrecorded facts get "ShopDesk doesn't have that"; drafts mention only products a tool returned, and no made-up services.
+- **Browser testing with the Playwright MCP** (`.mcp.json`; its output folder is ignored by git). It found that a ticket without an order still offered "Check the order", which is now fixed.
+
+**Why:** product questions are where the model invents facts that contain no numbers: restock dates, features, other products. The grounding check can't catch those.
+
+**Learned:**
+- **The first draft invented a product** ("Comfort Grip Mat") **and a feature** (back-in-stock alerts). Stating the gap in the tool result stopped the feature; a rule plus looking up alternatives stopped the made-up product.
+- **Groq rejects tool arguments that don't match the schema**, and that kills the whole reply. Keep schemas as simple as what the model naturally sends.
+- **A filter with the wrong meaning made the model loop** to the step limit. The fixes were an `available` filter and "don't repeat the search".
+
+**Where:** `backend/app/services/tools.py` (`search_products`), `backend/app/services/stats.py` (`LOW_STOCK`, `stock_status`), `backend/app/services/chat.py` (prompt)
+
+---
+
 ## Not committed yet
 
 Nothing yet.
