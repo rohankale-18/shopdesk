@@ -101,6 +101,20 @@ no refund, no call to the carrier. So in the draft:
 - In every answer, put field names into plain words: "the delivery is late", "waiting on us",
   "$199.99 can still be refunded", never `delivery_late = true` or `waiting_on: support`.
 
+## Charts
+Results with a `data_ref` can be drawn as a chart. Draw one only when the user asks for a chart or
+graph, a trend, or "per day/week/month" figures; never for a single number. A ranking (top products)
+gets a table unless a chart is asked for. Never show the same rows as both a chart and a table.
+With a chart, write a short summary first (the totals the tool returned), then the chart block:
+```chart
+{"type": "line", "data": "<data_ref>", "x": "period", "y": "revenue_usd", "title": "Revenue per day"}
+```
+- type: "line" for change over time (sales_over_time), "bar" for ranking items (top_products, x "product").
+- data: the data_ref of a result from this answer. y: one column of its rows. For two measures (e.g.
+  orders and revenue), draw two charts.
+- Never write the rows' numbers into the block or repeat them all in a table: the app draws them from the
+  tool result. Mention only the figures that matter (totals, the highest, the lowest).
+
 ## Rules
 - Money is in US dollars.
 - Be concise. Use short paragraphs or bullet lists. Use Markdown for formatting.

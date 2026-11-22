@@ -198,6 +198,18 @@ Each entry covers:
 
 ---
 
-## Not committed yet
+## 2026-11-22 · Analytics and charts (Step 8)
 
-Nothing yet.
+**Done:**
+- **`sales_over_time`** returns orders and revenue per day, week or month; **`top_products`** returns best sellers. Both are computed in code, with totals.
+- **Charts in the chat:** the model writes a ` ```chart ` block that names a tool result (`data_ref`) and its columns. The app draws a line or bar chart from the tool's own rows. Every chart has a table view and works in dark mode.
+- **Chart data is sent with the tool events and saved with each message**, so charts survive a reload.
+
+**Why:** "show revenue as a chart" should give a chart, not a wall of numbers. It's also the first time the model produces something the app renders, not just text.
+
+**Learned:**
+- **The model points at data instead of copying it.** It can't mistype a point, and a chart costs one line of output.
+- **It added up rows itself and got 29 instead of 22.** The tools now return the totals.
+- **A note in the tool result** ("don't also list these rows in a table") **worked where the prompt rule didn't**, the third time this has happened.
+
+**Where:** `backend/app/services/tools.py` (`sales_over_time`, `top_products`, `chart_data`), `backend/app/services/stats.py`, `backend/app/routers/chat.py`, `frontend/src/components/chat/ChatChart.tsx`, `ChatMarkdown.tsx`

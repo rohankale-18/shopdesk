@@ -214,9 +214,16 @@ export interface AIStatus {
 export type ChatRole = 'user' | 'assistant'
 
 /** A tool the assistant ran while writing a reply, e.g. "Looked up store overview". */
+/** A data tool's rows, which a ```chart block in the reply can point at by `ref`. */
+export interface ToolData {
+  ref: string
+  rows: Record<string, string | number | null>[]
+}
+
 export interface ToolUse {
   name: string
   label: string
+  data?: ToolData | null
 }
 
 export interface ChatMessage {

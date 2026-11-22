@@ -171,7 +171,7 @@ def test_agent_runs_the_tool_and_answers_with_its_result(client, scripted_model)
     events = send(client, cid, "How many open tickets are there?")
 
     assert [name for name, _ in events] == ["tool", "delta", "delta", "done"]
-    assert events[0][1] == {"name": "get_store_overview", "label": "Looked up store overview"}
+    assert events[0][1] == {"name": "get_store_overview", "label": "Looked up store overview", "data": None}
 
     # First call: the model gets the tool list. Second call: it gets its request and our result.
     first_messages, first_kwargs = calls[0]
@@ -187,7 +187,9 @@ def test_agent_runs_the_tool_and_answers_with_its_result(client, scripted_model)
     # The tool call is saved with the reply, so the chip survives a reload.
     reply = client.get(f"/api/chat/conversations/{cid}").json()["messages"][-1]
     assert reply["content"] == "There are N open tickets."
-    assert reply["tool_calls"] == [{"name": "get_store_overview", "label": "Looked up store overview"}]
+    assert reply["tool_calls"] == [
+        {"name": "get_store_overview", "label": "Looked up store overview", "data": None}
+    ]
 
 
 def test_agent_answers_without_tools_when_none_needed(client, scripted_model):
@@ -315,3 +317,31 @@ def test_a_plain_chat_has_no_ticket(client, fake_model):
     cid = new_chat(client)
     send(client, cid, "hi")
     assert [m["role"] for m in fake_model[0]].count("system") == 1
+
+
+# ---------- chart data (Step 8) ----------
+
+
+def test_chart_data_reaches_the_ui_live_and_after_reload(client, monkeypatch):
+    args = json.dumps({"start_date": "2026-05-01", "end_date": "2026-05-07"})
+    calls = []
+
+    def model(messages, **_):
+        calls.append(messages)
+        if len(calls) == 1:
+            return iter([ai.ToolCall(id="c1", name="sales_over_time", arguments=args)])
+        ref = json.loads(messages[-1]["content"])["data_ref"]
+        block = json.dumps({"type": "line", "data": ref, "x": "period", "y": "orders"})
+        return iter([f"Sales per day.\n```chart\n{block}\n```"])
+
+    monkeypatch.setattr(ai, "stream", model)
+    cid = new_chat(client)
+    events = send(client, cid, "Orders per day in the first week of May, as a chart")
+
+    (tool,) = [data for name, data in events if name == "tool"]
+    assert (
+        len(tool["data"]["rows"]) == 7
+        and tool["data"]["ref"] in events[-1][1]["assistant_message"]["content"]
+    )
+    saved = client.get(f"/api/chat/conversations/{cid}").json()["messages"][-1]["tool_calls"]
+    assert saved[0]["data"] == tool["data"]

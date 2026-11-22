@@ -11,7 +11,9 @@ To add a tool: write the function, add a `Tool(...)` to `TOOLS`. Nothing else ch
 
 import json
 import logging
+import random
 import re
+import string
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -32,7 +34,15 @@ from app.models import (
     TicketPriority,
     TicketStatus,
 )
-from app.services.stats import LOW_STOCK, sales_totals, stock_status, store_overview
+from app.services.stats import (
+    INTERVALS,
+    LOW_STOCK,
+    product_sales,
+    sales_series,
+    sales_totals,
+    stock_status,
+    store_overview,
+)
 
 logger = logging.getLogger("shopdesk.tools")
 
@@ -508,6 +518,115 @@ def search_products(
     return result
 
 
+# ---------- data for charts ----------
+
+MAX_ROWS = 92  # about three months of days; beyond that a chart is unreadable
+
+
+# In every data result: a prompt rule alone didn't stop the model listing the rows under the chart too.
+CHART_NOTE = (
+    "To chart these rows, write a chart block with this data_ref: the app draws them from this result. "
+    "When you chart them, don't also list them in a table or as bullets."
+)
+
+
+def data_ref() -> str:
+    """A short id for a result's rows, so a chart block can point at them instead of copying them.
+
+    Letters only: the grounding check reads every digit in the answer as a number.
+    """
+    return "".join(random.choices(string.ascii_lowercase, k=6))
+
+
+def sales_over_time(db: Session, start_date: str, end_date: str, interval: str = "day") -> dict[str, Any]:
+    start, end = parse_period(start_date, end_date)
+    if interval not in INTERVALS:
+        raise ToolError(f"interval can only be {', '.join(INTERVALS)}; got {interval!r}.")
+    periods = sales_series(db, start, end, interval)
+    if len(periods) > MAX_ROWS:
+        raise ToolError(
+            f"That's {len(periods)} {interval}s, more than {MAX_ROWS}. Use a longer interval (week or month)."
+        )
+    label = (lambda d: d.strftime("%Y-%m")) if interval == "month" else (lambda d: d.isoformat())
+    return {
+        "from": start.isoformat(),
+        "to": end.isoformat(),
+        "interval": interval,
+        # Worked out here, so the model never adds up the rows itself.
+        "totals": {
+            "orders": sum(p.orders for p in periods),
+            "revenue_usd": _usd(sum(p.revenue_cents for p in periods)),
+        },
+        "data_ref": data_ref(),
+        "chart_note": CHART_NOTE,
+        "rows": [
+            {
+                "period": label(p.start),
+                "days": p.days,
+                "orders": p.orders,
+                "revenue_usd": _usd(p.revenue_cents),
+            }
+            for p in periods
+        ],
+        "about_rows": (
+            f"One row per {interval}: orders placed and revenue before refunds, cancelled orders excluded. "
+            "'days' is how many days of that period fall in the range (the first and last can be partial)."
+        ),
+    }
+
+
+def top_products(
+    db: Session, start_date: str, end_date: str, by: str = "units", limit: Any = 5
+) -> dict[str, Any]:
+    start, end = parse_period(start_date, end_date)
+    if by not in ("units", "revenue"):
+        raise ToolError(f"by can only be units or revenue; got {by!r}.")
+    try:
+        limit = max(1, min(int(limit), PRODUCTS_SHOWN))
+    except (TypeError, ValueError):
+        raise ToolError(f"limit must be a number from 1 to {PRODUCTS_SHOWN}.") from None
+    sold = product_sales(db, start, end)
+    key = (lambda p: (p.units, p.revenue_cents)) if by == "units" else (lambda p: (p.revenue_cents, p.units))
+    ranked = sorted(sold, key=key, reverse=True)[:limit]
+    return {
+        "from": start.isoformat(),
+        "to": end.isoformat(),
+        "ranked_by": by,
+        "products_sold": len(sold),
+        # Sums done here: asked for the top 5, the model added up the units itself and got 29, not 22.
+        "totals": {
+            "shown": {
+                "units_sold": sum(p.units for p in ranked),
+                "revenue_usd": _usd(sum(p.revenue_cents for p in ranked)),
+            },
+            "all_products": {
+                "units_sold": sum(p.units for p in sold),
+                "revenue_usd": _usd(sum(p.revenue_cents for p in sold)),
+            },
+        },
+        "data_ref": data_ref(),
+        "chart_note": CHART_NOTE,
+        "rows": [
+            {
+                "rank": i,
+                "product": p.name,
+                "sku": p.sku,
+                "units_sold": p.units,
+                "revenue_usd": _usd(p.revenue_cents),
+            }
+            for i, p in enumerate(ranked, 1)
+        ],
+        "about_rows": "Orders placed in the period, cancelled ones excluded; revenue is before refunds.",
+    }
+
+
+def chart_data(result: dict[str, Any]) -> dict[str, Any] | None:
+    """The part of a tool result the chat needs to draw a chart: its data_ref and rows."""
+    if "data_ref" not in result:
+        return None
+    return {"ref": result["data_ref"], "rows": result["rows"]}
+
+
 def _products_label(a: dict[str, Any]) -> str:
     if a.get("query"):
         return f"Searched products for “{a['query']}”"
@@ -577,7 +696,8 @@ TOOLS = {
                 "excluded), average order value, cancelled orders, and refunds issued in the period "
                 "(count and amount). It has nothing on tickets or stock. "
                 "Use it whenever a question names a period: 'last 10 days', 'last week', 'in October', "
-                "'since the 1st'. To compare two periods, put the later period in start_date/end_date "
+                "'since the 1st'. For a breakdown per day, week or month, use sales_over_time. "
+                "To compare two periods, put the later period in start_date/end_date "
                 "and the earlier one in compare_start_date/compare_end_date: the result then "
                 "includes `change` (later minus earlier, and % change) and `change_means`, which "
                 "says which way round it is, so you never need to calculate it. "
@@ -749,6 +869,55 @@ TOOLS = {
                 },
             },
             run=search_products,
+        ),
+        Tool(
+            name="sales_over_time",
+            label=lambda a: (
+                f"Looked up sales per {a.get('interval', 'day')}, {a['start_date']} to {a['end_date']}"
+            ),
+            description=(
+                "Orders and revenue (before refunds, cancelled orders excluded) per day, week (Monday to "
+                "Sunday) or month, for a date range, plus the totals. Every period is included, with "
+                "zeros where nothing sold. Use it for trends, 'per day' / 'by week' / 'by month' questions "
+                "and charts. Its rows can be drawn with a chart block using data_ref. For one total or a "
+                f"comparison of two periods, use get_sales. At most {MAX_ROWS} rows: for long ranges use "
+                "week or month."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "start_date": _date_param("First day, YYYY-MM-DD."),
+                    "end_date": _date_param("Last day (inclusive), YYYY-MM-DD."),
+                    "interval": {"type": "string", "enum": list(INTERVALS), "description": "Default: day."},
+                },
+                "required": ["start_date", "end_date"],
+            },
+            run=sales_over_time,
+        ),
+        Tool(
+            name="top_products",
+            label=lambda a: f"Looked up top products, {a['start_date']} to {a['end_date']}",
+            description=(
+                "Best-selling products in a date range, ranked by units sold or by revenue (before "
+                "refunds, cancelled orders excluded), with units and revenue for each, how many "
+                "different products sold, and totals for the ones shown and for all products. "
+                f"Up to {PRODUCTS_SHOWN}. Its rows can be drawn with a chart "
+                "block using data_ref. For stock levels, use search_products."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "start_date": _date_param("First day, YYYY-MM-DD."),
+                    "end_date": _date_param("Last day (inclusive), YYYY-MM-DD."),
+                    "by": {"type": "string", "enum": ["units", "revenue"], "description": "Default: units."},
+                    "limit": {
+                        "type": "integer",
+                        "description": f"How many, 1 to {PRODUCTS_SHOWN}. Default 5.",
+                    },
+                },
+                "required": ["start_date", "end_date"],
+            },
+            run=top_products,
         ),
     ]
 }

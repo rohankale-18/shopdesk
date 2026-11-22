@@ -33,11 +33,18 @@ class ToolCallOut(BaseModel):
 
     name: str
     arguments: str = Field(exclude=True)  # only used to build the label
+    result: str = Field(exclude=True)  # JSON; only used for `data`
 
     @computed_field
     @property
     def label(self) -> str:
         return tools.label(self.name, self.arguments)
+
+    @computed_field
+    @property
+    def data(self) -> dict | None:
+        """The rows a chart block in the reply can point at (data tools only)."""
+        return tools.chart_data(json.loads(self.result))
 
 
 class ChatMessageOut(BaseModel):
@@ -132,7 +139,8 @@ def send_message(conversation_id: int, body: SendMessage, db: DB):
     """Send a message; the assistant's reply streams back as Server-Sent Events.
 
     - `delta`: `{"text": "..."}`, the next piece of the reply.
-    - `tool`: `{"name": "...", "label": "..."}`, the assistant ran a tool (it may run several).
+    - `tool`: `{"name": "...", "label": "...", "data": ...}`, the assistant ran a tool (it may run several).
+      `data` is `{"ref": "...", "rows": [...]}` for tools whose rows a chart can draw, else null.
     - `done`: `{"user_message": ..., "assistant_message": ...}`, both saved. Always last on success.
     - `error`: `{"code": "...", "message": "..."}` if it fails mid-stream. Nothing is saved.
 
@@ -161,7 +169,8 @@ def send_message(conversation_id: int, body: SendMessage, db: DB):
             for chunk in chunks:
                 if isinstance(chunk, ToolRun):
                     label = tools.label(chunk.name, chunk.arguments)
-                    yield _sse("tool", {"name": chunk.name, "label": label})
+                    data = tools.chart_data(chunk.result)
+                    yield _sse("tool", {"name": chunk.name, "label": label, "data": data})
                 else:
                     parts.append(chunk)
                     yield _sse("delta", {"text": chunk})

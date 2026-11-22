@@ -14,7 +14,7 @@ The support assistant learns one capability at a time. Each step adds **one new 
 | 5 | Search, then chain | `find_customer`, `list_customer_orders` | Multi-step reasoning, ambiguity, limits | ✅ |
 | 6 | Tickets | `get_ticket`, `list_tickets` | Summarizing real data, page context | ✅ |
 | 7 | Products and stock | `search_products` | Grounding: never invent facts | ✅ |
-| 8 | Analytics and charts | `sales_by_day`, `top_products` | Structured output rendered as charts | ⬜ |
+| 8 | Analytics and charts | `sales_over_time`, `top_products` | Structured output rendered as charts | ✅ |
 | 9 | Actions with approval | `draft_ticket_reply`, `create_refund`, `cancel_order` | Human in the loop, backend-enforced rules | ⬜ |
 | 10 | Evals | none | Measuring whether a change made the agent better | ⬜ |
 | 11 | Flexible queries | `query_orders` (and maybe `run_sql`) | One tool for many questions: a structured query the code turns into SQL | ⬜ |
@@ -392,25 +392,52 @@ Already in place before the agent work starts.
 
 ---
 
-## Step 8: Analytics and charts ⬜
+## Step 8: Analytics and charts ✅
 
-**Tools:** `sales_by_day`, `top_products` (or similar), returning rows of data
+**Tools:**
+- `sales_over_time(start_date, end_date, interval)`: orders and revenue per day, week or month, with the totals.
+- `top_products(start_date, end_date, by, limit)`: best sellers by units or revenue, with totals for the products shown and for all products.
 
 **What you learn**
-- **Structured output for the UI:** the model returns a chart spec (for example a fenced ` ```chart ` block with JSON), and the frontend renders a real chart instead of text.
+- **Structured output for the UI:** the model writes a ` ```chart ` block, and the chat draws a real chart from it.
+- **Data by reference:** the chart block names a tool result (`data_ref`) and the columns to draw. It never contains the numbers: the app reads them straight from the tool result. The model can't mistype a point, and a 30-point chart costs one line of output.
 
 **Tasks**
-- [ ] Analytics tools that return compact data
-- [ ] Chart block format, documented in the system prompt
-- [ ] Render chart blocks in `frontend/src/components/chat/ChatMarkdown.tsx`
-- [ ] Check against Step 11 first: if `query_orders` will cover "by day" and "top N", build just enough here for the charts, and avoid two tools that answer the same question.
+- [x] `sales_series()` and `product_sales()` in `stats.py`, with the same rules as `get_sales` (cancelled orders excluded, revenue before refunds). Every day, week or month is included, with zeros where nothing sold. Each period has `days` in range, because the first and last can be partial.
+- [x] The two tools. Each result has a `data_ref` (6 letters, no digits, so the grounding check ignores it), `rows`, totals computed in code, and a `chart_note`. At most 92 rows; for longer ranges the tool asks for weeks or months.
+- [x] Chart rows reach the UI: the `tool` stream event and saved messages' `tool_calls` carry `data: {ref, rows}` for data tools (`tools.chart_data()`), so charts survive a reload.
+- [x] Prompt ("## Charts"):
+  - the block format;
+  - line charts for time, bar charts for rankings;
+  - one measure per chart;
+  - chart only when asked, rankings as a table unless a chart is asked for;
+  - never the same rows as both a chart and a table.
+- [x] `ChatChart` (`frontend/src/components/chat/ChatChart.tsx`), drawn in SVG and HTML with no chart library:
+  - **line charts:** 2px line, 10% area wash, round axis ticks, a hover crosshair and a readout of the value above the plot;
+  - **bar charts:** horizontal, value at the tip;
+  - every chart has a "Show table" view, uses the validated `--viz-1` colour, and works in light and dark;
+  - a half-written block while streaming shows a placeholder, and a missing data_ref or column shows a note.
+- [x] Tests:
+  - totals match `get_sales`;
+  - all periods appear with zeros, partial weeks and months are counted correctly;
+  - the ranking matches the order items;
+  - totals are computed in code;
+  - the chart data reaches the UI live and after a reload.
 
-**Test questions**
-- "Show revenue for the last 30 days as a chart."
-- "What were our top 5 products this month?"
+**Test questions** (tried against the real model, in the browser with Playwright)
+- "Show revenue for the last 30 days as a chart.": `sales_over_time` (day), the totals from the tool, a line chart.
+- "What were our top 5 products this month?": a table, no chart.
+- "Show our top 5 products this month as a chart, by revenue.": a bar chart, plus totals from the tool ($2,465.81 of $5,386.29, 19 units). 3 runs out of 3 with no duplicate table.
+- "What was our revenue last month?": one number, no chart.
+- "Chart orders per week for the last 3 months.": a weekly line chart.
 
 **Notes / what I learned**
--
+- (observed) **Pointing at the data works.** The model copied the 6-letter `data_ref` correctly every time, and never wrote rows into a chart block. A 30-day chart cost about 300 output tokens for the whole answer.
+- (observed) **The model added numbers up again, and got it wrong.** Asked for the top 5, it wrote "Total units sold by these five items: 29". The real total is 22. The grounding check missed it, because "29" appears somewhere else in the tool result. Fix: `top_products` returns totals for the products shown and for all products, computed in code. Same lesson as Step 1: if a sum might be asked for, the tool should provide it.
+- (observed) **Again, a note in the tool result beat a prompt rule.** With only the prompt rule, the model drew a chart nobody asked for, and repeated the same rows in a table under a chart. Making the rule more specific fixed the unrequested chart. The duplicate table stopped only once each data result carried a `chart_note` ("when you chart them, don't also list them in a table"): 3 runs out of 3.
+- (observed) **Partial periods look like drops.** For "the last 3 months" by week, the model started on a Saturday, so the first week had 2 days and 1 order. The rows say `days: 2`, but the chart doesn't show it. Possible fixes: widen the range to whole weeks or months, or mark partial periods on the chart.
+- (observed) **Playwright screenshots sometimes come back blank** on the assistant page, even though the page structure shows the chart rendered and on screen. A puppeteer screenshot of the same page was correct. Check the page contents before trusting a blank screenshot.
+- (limit) One series per chart. "This week vs last week, per day" would need two data_refs on one chart, which isn't supported yet.
 
 ---
 

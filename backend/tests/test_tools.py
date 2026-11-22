@@ -388,3 +388,82 @@ def test_product_labels():
     assert tools.label("search_products", '{"query": "mat"}') == "Searched products for “mat”"
     assert tools.label("search_products", '{"stock": "out_of_stock"}') == "Looked up products (out of stock)"
     assert tools.label("search_products") == "Looked up products"
+
+
+# ---------- sales_over_time, top_products (data for charts) ----------
+
+
+def test_sales_over_time_adds_up_to_get_sales(client):
+    for interval in ("day", "week", "month"):
+        result = run("sales_over_time", start_date=PERIOD[0], end_date=PERIOD[1], interval=interval)
+        sales = run("get_sales", start_date=PERIOD[0], end_date=PERIOD[1])["period"]
+        assert result["totals"] == {
+            "orders": sales["orders_placed"],
+            "revenue_usd": sales["revenue_before_refunds_usd"],
+        }
+        assert sum(r["orders"] for r in result["rows"]) == sales["orders_placed"]
+        assert sum(r["days"] for r in result["rows"]) == 31  # every day counted once
+
+
+def test_sales_over_time_periods(client):
+    days = run("sales_over_time", start_date="2026-05-01", end_date="2026-05-31")["rows"]
+    assert [r["period"] for r in days[:2]] == ["2026-05-01", "2026-05-02"] and len(days) == 31  # zeros kept
+    weeks = run("sales_over_time", start_date="2026-05-01", end_date="2026-05-31", interval="week")["rows"]
+    assert weeks[0] == {**weeks[0], "period": "2026-04-27", "days": 3}  # Monday; Fri-Sun in range
+    months = run("sales_over_time", start_date="2026-04-15", end_date="2026-05-31", interval="month")["rows"]
+    assert [(r["period"], r["days"]) for r in months] == [("2026-04", 16), ("2026-05", 31)]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({"start_date": "2026-01-01", "end_date": "2026-05-31"}, "Use a longer interval"),
+        ({"start_date": "2026-05-01", "end_date": "2026-05-31", "interval": "hour"}, "interval can only be"),
+    ],
+)
+def test_bad_sales_over_time_arguments(client, arguments, message):
+    assert message in run("sales_over_time", **arguments)["error"]
+
+
+def test_top_products_match_the_order_items(client):
+    by_units = run("top_products", start_date=PERIOD[0], end_date=PERIOD[1], limit=10)
+    within = lambda when: date(2026, 5, 1) <= when.astimezone(UTC).date() <= date(2026, 5, 31)  # noqa: E731
+    units: dict[str, int] = {}
+    with SessionLocal() as db:
+        for o in db.scalars(select(Order)):
+            if within(o.placed_at) and o.status != OrderStatus.cancelled:
+                for i in o.items:
+                    units[i.product_name] = units.get(i.product_name, 0) + i.quantity
+    assert by_units["products_sold"] == len(units)
+    top = by_units["rows"][0]
+    assert top["rank"] == 1 and top["units_sold"] == max(units.values()) == units[top["product"]]
+    ranked = [r["units_sold"] for r in by_units["rows"]]
+    assert ranked == sorted(ranked, reverse=True)
+    by_revenue = run("top_products", start_date=PERIOD[0], end_date=PERIOD[1], by="revenue", limit=3)
+    revenue = [r["revenue_usd"] for r in by_revenue["rows"]]
+    assert len(revenue) == 3 and revenue == sorted(revenue, reverse=True)
+
+
+def test_data_tools_give_rows_a_chart_can_point_at(client):
+    result = run("top_products", start_date=PERIOD[0], end_date=PERIOD[1])
+    ref = result["data_ref"]
+    assert ref.isalpha() and len(ref) == 6  # no digits for the grounding check to pick up
+    assert tools.chart_data(result) == {"ref": ref, "rows": result["rows"]}
+    assert tools.chart_data(run("get_store_overview")) is None
+
+
+def test_data_tool_labels():
+    args = {"start_date": "2026-05-01", "end_date": "2026-05-31", "interval": "week"}
+    assert (
+        tools.label("sales_over_time", json.dumps(args))
+        == "Looked up sales per week, 2026-05-01 to 2026-05-31"
+    )
+    assert tools.label("top_products", json.dumps(args)) == "Looked up top products, 2026-05-01 to 2026-05-31"
+
+
+def test_top_products_totals_are_worked_out_in_code(client):
+    result = run("top_products", start_date=PERIOD[0], end_date=PERIOD[1], limit=3)
+    shown, everything = result["totals"]["shown"], result["totals"]["all_products"]
+    assert shown["units_sold"] == sum(r["units_sold"] for r in result["rows"])
+    sales = run("get_sales", start_date=PERIOD[0], end_date=PERIOD[1])["period"]
+    assert everything["revenue_usd"] == sales["revenue_before_refunds_usd"]  # every item of every order

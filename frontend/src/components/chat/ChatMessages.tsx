@@ -1,4 +1,4 @@
-import { Suspense, useState } from 'react'
+import { Suspense, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ActivityIcon, CheckIcon, CopyIcon, DatabaseIcon, SparklesIcon } from 'lucide-react'
 import { cn } from 'cn'
@@ -83,6 +83,8 @@ export function AssistantMessage({
   traceId?: number | null
   streaming?: boolean
 }) {
+  // Stable while the tools don't change, so charts aren't redrawn from scratch on every render.
+  const data = useMemo(() => tools.flatMap((t) => (t.data ? [t.data] : [])), [tools])
   return (
     <Message className="group/reply">
       <MessageContent className="gap-1">
@@ -90,7 +92,9 @@ export function AssistantMessage({
         {content.trim() ? (
           <div className="chat-md text-[15px] leading-7 text-ink">
             <Suspense fallback={<p className="whitespace-pre-wrap">{content}</p>}>
-              <ChatMarkdown>{content}</ChatMarkdown>
+              <ChatMarkdown data={data} streaming={streaming}>
+                {content}
+              </ChatMarkdown>
             </Suspense>
           </div>
         ) : (
