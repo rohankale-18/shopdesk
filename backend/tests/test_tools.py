@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import func, select
 
 from app.db import SessionLocal
-from app.models import Order, OrderStatus, Refund
+from app.models import Order, OrderStatus, Refund, Ticket
 from app.services import tools
 
 PERIOD = ("2026-05-01", "2026-05-31")  # inside the seeded data (anchor date 2026-06-01)
@@ -223,3 +223,88 @@ def test_list_customer_orders_is_capped(client, monkeypatch):
 def test_unknown_customer_id_goes_back_as_an_error(client, customer_id):
     result = run("list_customer_orders", customer_id=customer_id)
     assert "find_customer first" in result["error"]
+
+
+def test_get_order_flags_a_late_delivery(client):
+    assert run("get_order", order_number="2")["delivery_late"] is True  # shipped 12 days ago
+    assert run("get_order", order_number="3")["delivery_late"] is False  # delivered
+
+
+# ---------- get_ticket, list_tickets ----------
+
+
+def test_get_ticket_has_the_thread_and_the_order(client):
+    ticket = run("get_ticket", ticket_id=2)
+    assert (ticket["subject"], ticket["status"], ticket["waiting_on"]) == (
+        "Still waiting for my lamp",
+        "open",
+        "support",  # the customer wrote last
+    )
+    assert ticket["customer"]["email"] == "marcus.lee@example.com"
+    assert ticket["order"]["number"] == "ORD-00000002"
+    assert ticket["order"]["delivery_late"] is True
+    assert [m["from"] for m in ticket["messages"]] == ["customer"]
+    assert "tracking hasn't moved" in ticket["messages"][0]["text"]
+
+
+def test_a_ticket_without_an_order(client):
+    ticket = run("get_ticket", ticket_id=5)  # the yoga mat question
+    assert ticket["order"] is None
+
+
+@pytest.mark.parametrize("ticket_id", [999999, "abc", None])
+def test_unknown_ticket_goes_back_as_an_error(client, ticket_id):
+    assert "There is no ticket" in run("get_ticket", ticket_id=ticket_id)["error"]
+
+
+def test_list_tickets_defaults_to_open_tickets_most_urgent_first(client):
+    result = run("list_tickets")
+    with SessionLocal() as db:
+        open_now = db.scalar(
+            select(func.count()).select_from(Ticket).where(Ticket.status.in_(["open", "pending"]))
+        )
+    assert result["total_matches"] == open_now == sum(result["by_priority"].values())
+    assert {t["status"] for t in result["tickets"]} <= {"open", "pending"}
+    ranks = [tools.PRIORITY_RANK[t["priority"]] for t in result["tickets"]]
+    assert ranks == sorted(ranks)
+    assert list(result["by_priority"]) == ["urgent", "high", "medium", "low"]
+
+
+def test_list_tickets_filters(client):
+    high = run("list_tickets", priority=["high"])
+    assert high["tickets"] and {t["priority"] for t in high["tickets"]} == {"high"}
+    assert high["by_priority"]["medium"] == 0
+    closed = run("list_tickets", status=["resolved", "closed"])
+    assert all(t["waiting_on"] is None for t in closed["tickets"])  # nothing left to do
+    james = run("find_customer", query="james.okafor")["matches"][0]
+    theirs = run("list_tickets", customer_id=james["id"])
+    assert {t["subject"] for t in theirs["tickets"]} >= {
+        "Please cancel my order",
+        "When is the yoga mat back?",
+    }
+
+
+def test_list_tickets_is_capped(client):
+    result = run("list_tickets", limit=2)
+    assert len(result["tickets"]) == 2 < result["total_matches"]
+    assert result["showing"] == "the 2 most urgent, oldest first"
+    assert len(run("list_tickets", limit=500)["tickets"]) <= tools.TICKETS_SHOWN
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({"status": ["opened"]}, "status can only be open, pending, resolved, closed"),
+        ({"priority": "critical"}, "priority can only be"),
+        ({"limit": "lots"}, "limit must be a number"),
+    ],
+)
+def test_bad_ticket_filters_go_back_to_the_model(client, arguments, message):
+    assert message in run("list_tickets", **arguments)["error"]
+
+
+def test_ticket_labels():
+    assert tools.label("get_ticket", '{"ticket_id": 12}') == "Looked up ticket #12"
+    assert tools.label("list_tickets") == "Looked up tickets (open, pending)"
+    args = {"status": ["open"], "priority": ["urgent", "high"]}
+    assert tools.label("list_tickets", json.dumps(args)) == "Looked up tickets (open; urgent, high)"

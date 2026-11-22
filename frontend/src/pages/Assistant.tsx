@@ -1,11 +1,11 @@
 import { startTransition, useEffect, useRef, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
-import { PanelLeftIcon, SquarePenIcon } from 'lucide-react'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { PanelLeftIcon, SquarePenIcon, TicketIcon, XIcon } from 'lucide-react'
 import { cn } from 'cn'
 
 import { ApiError } from '@/api/client'
 import type { ToolUse } from '@/api/types'
-import { useAIStatus, useConversation, useCreateConversation, useSendChatMessage } from '@/api/hooks'
+import { useAIStatus, useConversation, useCreateConversation, useSendChatMessage, useTicket } from '@/api/hooks'
 import { AssistantMark, AssistantMessage, Typing, UserMessage } from '@/components/chat/ChatMessages'
 import { preloadMarkdown } from '@/components/chat/lazyMarkdown'
 import { Composer } from '@/components/chat/Composer'
@@ -29,6 +29,53 @@ const SUGGESTIONS = [
   { title: 'Soften a message', prompt: 'Rewrite this to sound friendlier: "Your request has been denied."' },
   { title: 'Store overview', prompt: 'How are we doing this month?' },
 ]
+
+// A chat opened from a ticket page ("Ask about this ticket").
+const TICKET_SUGGESTIONS = [
+  { title: 'What do they want?', prompt: 'What does this customer want?' },
+  { title: 'Suggest a reply', prompt: 'Suggest a reply to this ticket' },
+  { title: 'Check the order', prompt: 'Is there a problem with the order?' },
+  { title: 'Next step', prompt: 'What should I do next on this ticket?' },
+]
+
+/**
+ * The ticket a chat is about. Above the composer while it's waiting to be sent (removable), then
+ * above the first message, like an attachment. Its current data goes to the model with every
+ * message (the backend's page context), so follow-ups keep it too.
+ */
+function TicketContext({ id, onRemove, attached }: { id: number; onRemove?: () => void; attached?: boolean }) {
+  const ticket = useTicket(id)
+  const missing = ticket.error instanceof ApiError && ticket.error.status === 404
+  return (
+    <div
+      className={cn(
+        'flex items-center gap-2 border border-line bg-sunken/60 px-3 py-2 text-[13px]',
+        attached ? 'ml-auto w-fit max-w-[80%] rounded-2xl' : 'mb-2 rounded-xl',
+      )}
+    >
+      <TicketIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+      <span className="min-w-0 flex-1 truncate">
+        <span className="text-muted-foreground">About </span>
+        <Link to={`/tickets/${id}`} className="font-medium text-cobalt hover:underline">
+          ticket #{id}
+        </Link>
+        {ticket.data && <span className="text-muted-foreground">: {ticket.data.subject}</span>}
+        {missing && <span className="text-muted-foreground"> (no longer exists)</span>}
+      </span>
+      {onRemove && (
+        <button
+          type="button"
+          aria-label="Don't attach this ticket"
+          title="Don't attach this ticket"
+          onClick={onRemove}
+          className="cursor-pointer rounded p-0.5 text-muted-foreground hover:bg-sunken hover:text-ink"
+        >
+          <XIcon className="size-3.5" />
+        </button>
+      )}
+    </div>
+  )
+}
 
 // The message being answered right now, the reply so far and the tools it ran.
 // `key` names its two rows on screen; `savedId` is set once both messages are saved.
@@ -79,6 +126,7 @@ export default function Assistant() {
   const params = useParams()
   const navigate = useNavigate()
   const activeId = params.id ? Number(params.id) : null
+  const [searchParams] = useSearchParams()
 
   const [sidebarOpen, setSidebarOpen] = useState(readSidebarPref) // desktop
   const [drawerOpen, setDrawerOpen] = useState(false) // mobile
@@ -101,6 +149,9 @@ export default function Assistant() {
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const abortRef = useRef<AbortController | null>(null)
 
+  // The ticket a new chat will be about (?ticket=12), or the one an existing chat is about.
+  const newChatTicket = activeId ? null : Number(searchParams.get('ticket')) || null
+  const ticketId = activeId ? (convo.data?.ticket_id ?? null) : newChatTicket
   const messages = convo.data?.messages ?? []
   const aiOff = status.data?.enabled === false
   const busy = turn !== null && turn.savedId === undefined
@@ -111,19 +162,29 @@ export default function Assistant() {
   const isEmpty = !activeId && !liveTurn
   // Saved and live messages in ONE list: React only matches keys within the same list, so this is
   // what lets a live row keep its element when the saved copy replaces it.
-  const rows: { key: string; role: 'user' | 'assistant'; node: React.ReactNode }[] = messages.map((m) => ({
+  // The first message carries the ticket, like an attached image.
+  const sent = (content: string, first: boolean) =>
+    first && ticketId ? (
+      <div className="flex flex-col gap-1.5">
+        <TicketContext id={ticketId} attached />
+        <UserMessage content={content} />
+      </div>
+    ) : (
+      <UserMessage content={content} />
+    )
+  const rows: { key: string; role: 'user' | 'assistant'; node: React.ReactNode }[] = messages.map((m, i) => ({
     key: rowKeys[m.id] ?? String(m.id),
     role: m.role,
     node:
       m.role === 'user' ? (
-        <UserMessage content={m.content} />
+        sent(m.content, i === 0)
       ) : (
         <AssistantMessage content={m.content} tools={m.tool_calls} traceId={m.trace_id} />
       ),
   }))
   if (liveTurn) {
     rows.push(
-      { key: `${liveTurn.key}-user`, role: 'user', node: <UserMessage content={liveTurn.content} /> },
+      { key: `${liveTurn.key}-user`, role: 'user', node: sent(liveTurn.content, messages.length === 0) },
       {
         key: `${liveTurn.key}-reply`,
         role: 'assistant',
@@ -175,7 +236,7 @@ export default function Assistant() {
     setError(null)
     try {
       if (!id) {
-        const newId = (await create.mutateAsync()).id
+        const newId = (await create.mutateAsync(newChatTicket)).id
         id = newId
         // One render for all three (navigation alone would be a separate, later render).
         startTransition(() => {
@@ -225,6 +286,8 @@ export default function Assistant() {
 
   const notices = (
     <>
+      {/* Only until it's sent: then it sits on the first message. */}
+      {isEmpty && newChatTicket && <TicketContext id={newChatTicket} onRemove={() => navigate('/assistant')} />}
       {aiOff && (
         <p className="mb-3 rounded-xl border border-line bg-st-amber-wash px-4 py-2.5 text-[13px] text-st-amber">
           AI isn't configured. Set <code className="font-mono">GROQ_API_KEY</code> in{' '}
@@ -305,15 +368,19 @@ export default function Assistant() {
               <div className="w-full max-w-3xl">
                 <div className="mb-8 flex flex-col items-center text-center">
                   <AssistantMark className="mb-4 size-12 [&_svg]:size-6" />
-                  <h2 className="text-[26px] font-semibold tracking-tight">How can I help with support today?</h2>
+                  <h2 className="text-[26px] font-semibold tracking-tight">
+                    {newChatTicket ? `What would you like to know about ticket #${newChatTicket}?` : 'How can I help with support today?'}
+                  </h2>
                   <p className="mt-2 text-[14px] text-muted-foreground">
-                    Draft replies, handle tricky cases, or ask how the store is doing.
+                    {newChatTicket
+                      ? 'The ticket, its messages and its order go with every question.'
+                      : 'Draft replies, handle tricky cases, or ask how the store is doing.'}
                   </p>
                 </div>
                 {notices}
                 {composer}
                 <div className="mt-4 grid gap-2 sm:grid-cols-2">
-                  {SUGGESTIONS.map((s) => (
+                  {(newChatTicket ? TICKET_SUGGESTIONS : SUGGESTIONS).map((s) => (
                     <button
                       key={s.title}
                       type="button"

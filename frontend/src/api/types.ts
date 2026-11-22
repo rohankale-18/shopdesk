@@ -296,6 +296,8 @@ export interface TraceDetail extends TraceSummary {
 export interface ConversationSummary {
   id: number
   title: string
+  /** Opened from this ticket ("Ask about this ticket"): its data goes with every message. */
+  ticket_id: number | null
   created_at: string
   updated_at: string
 }

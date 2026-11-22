@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
+import { MessageCircleIcon } from 'lucide-react'
 
 import { useOrder, useReplyToTicket, useTicket, useUpdateTicket } from '../api/hooks'
 import type { Ticket, TicketPriority, TicketStatus } from '../api/types'
@@ -27,6 +28,7 @@ const ASSIGNEES = ['asha', 'ben', 'chen', 'dana'] as const
 export function TicketDetail() {
   const id = Number(useParams().id)
   const q = useTicket(id)
+  const navigate = useNavigate()
 
   if (q.isPending) return <Panel><Loading /></Panel>
   if (q.isError) return <Panel><ErrorState error={q.error} onRetry={() => q.refetch()} /></Panel>
@@ -39,6 +41,12 @@ export function TicketDetail() {
       </Link>
       <PageHeader
         title={t.subject}
+        actions={
+          <Button onClick={() => navigate(`/assistant?ticket=${t.id}`)}>
+            <MessageCircleIcon className="size-4" aria-hidden />
+            Ask about this ticket
+          </Button>
+        }
         subtitle={
           <span className="flex flex-wrap items-center gap-2">
             <TicketBadge status={t.status} />

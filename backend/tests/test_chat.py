@@ -287,3 +287,31 @@ def test_agent_chains_tools_using_an_earlier_result(client, monkeypatch):
     orders = json.loads(seen[2][-1]["content"])
     assert orders["customer"]["name"] == "Priya Sharma"
     assert any(o["tickets"] for o in orders["orders"])  # the damaged-headphones ticket comes along
+
+
+# ---------- page context (Step 6) ----------
+
+
+def test_a_chat_opened_from_a_ticket_sends_the_ticket_each_turn(client, fake_model):
+    r = client.post("/api/chat/conversations", json={"ticket_id": 2})
+    assert r.status_code == 201 and r.json()["ticket_id"] == 2
+    cid = r.json()["id"]
+    send(client, cid, "What does this customer want?")
+    send(client, cid, "Draft a reply")
+
+    for messages in fake_model:  # every turn, right after the fixed prompt
+        assert messages[0] == {"role": "system", "content": system_prompt()}
+        assert messages[1]["role"] == "system"
+        assert messages[1]["content"].startswith("The user opened this conversation from ticket #2.")
+        assert "Still waiting for my lamp" in messages[1]["content"]
+    assert client.get(f"/api/chat/conversations/{cid}").json()["title"] == "#2: What does this customer want?"
+
+
+def test_a_chat_about_an_unknown_ticket_is_refused(client):
+    assert client.post("/api/chat/conversations", json={"ticket_id": 999999}).status_code == 404
+
+
+def test_a_plain_chat_has_no_ticket(client, fake_model):
+    cid = new_chat(client)
+    send(client, cid, "hi")
+    assert [m["role"] for m in fake_model[0]].count("system") == 1

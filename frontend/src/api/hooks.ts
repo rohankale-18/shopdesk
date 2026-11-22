@@ -88,8 +88,8 @@ export const useOrder = (id: number | null | undefined) =>
 export const useTickets = (p: Params) =>
   useQuery({ queryKey: keys.tickets(p), queryFn: () => api.get<Page<TicketSummary>>('/api/tickets', p), ...list })
 
-export const useTicket = (id: number) =>
-  useQuery({ queryKey: keys.ticket(id), queryFn: () => api.get<Ticket>(`/api/tickets/${id}`) })
+export const useTicket = (id: number, enabled = true) =>
+  useQuery({ queryKey: keys.ticket(id), queryFn: () => api.get<Ticket>(`/api/tickets/${id}`), enabled })
 
 // ---------- writes ----------
 
@@ -205,7 +205,9 @@ export function useDeleteConversation() {
 export function useCreateConversation() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: () => api.post<Conversation>('/api/chat/conversations'),
+    /** `ticketId`: the ticket the chat is about (page context), if any. */
+    mutationFn: (ticketId?: number | null) =>
+      api.post<Conversation>('/api/chat/conversations', ticketId ? { ticket_id: ticketId } : undefined),
     onSuccess: (convo) => {
       qc.setQueryData(chatKeys.conversation(convo.id), convo)
       return qc.invalidateQueries({ queryKey: chatKeys.list })

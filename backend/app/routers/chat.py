@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.errors import AppError, NotFoundError
 from app.db import SessionLocal, get_db
-from app.models import ChatConversation, ChatMessage, ChatRole, utcnow
+from app.models import ChatConversation, ChatMessage, ChatRole, Ticket, utcnow
 from app.services import tools, tracing
 from app.services.chat import EMPTY_REPLY, ToolRun, stream_reply
 from app.services.tracing import TraceRecorder
@@ -56,12 +56,17 @@ class ConversationSummary(BaseModel):
 
     id: int
     title: str
+    ticket_id: int | None  # opened from this ticket: its data goes with every message
     created_at: datetime
     updated_at: datetime
 
 
 class ConversationOut(ConversationSummary):
     messages: list[ChatMessageOut]
+
+
+class NewConversation(BaseModel):
+    ticket_id: int | None = None
 
 
 class SendMessage(BaseModel):
@@ -90,9 +95,12 @@ def list_conversations(db: DB):
 
 
 @router.post("/conversations", response_model=ConversationOut, status_code=status.HTTP_201_CREATED)
-def create_conversation(db: DB):
-    """Start an empty conversation."""
-    convo = ChatConversation()
+def create_conversation(db: DB, body: NewConversation | None = None):
+    """Start an empty conversation, optionally about a ticket (the page the user was on)."""
+    ticket_id = body.ticket_id if body else None
+    if ticket_id is not None and not db.get(Ticket, ticket_id):
+        raise NotFoundError(f"Ticket {ticket_id} not found.")
+    convo = ChatConversation(ticket_id=ticket_id)
     db.add(convo)
     db.commit()
     return convo
@@ -135,10 +143,11 @@ def send_message(conversation_id: int, body: SendMessage, db: DB):
     convo = _get(db, conversation_id)
     text = body.content.strip()
     is_first = not convo.messages
+    ticket_id = convo.ticket_id
 
     # Starts the model call now, so setup errors still become normal error responses.
     trace = TraceRecorder(question=text, model=get_settings().ai_model)
-    chunks = stream_reply(convo.messages, text, trace)
+    chunks = stream_reply(convo.messages, text, trace, convo.ticket_id)
     db.close()  # the stream below can take a while; it saves with its own session
 
     def save_trace_only() -> None:
@@ -179,7 +188,8 @@ def send_message(conversation_id: int, body: SendMessage, db: DB):
                 yield _sse("error", {"code": "not_found", "message": "This conversation was deleted."})
                 return
             if is_first:
-                convo.title = text[:80]  # the first message names the conversation
+                title = f"#{ticket_id}: {text}" if ticket_id else text
+                convo.title = title[:80]  # the first message names the conversation
             user_msg = ChatMessage(role=ChatRole.user, content=text)
             reply = "".join(parts).strip() or EMPTY_REPLY
             assistant_msg = ChatMessage(role=ChatRole.assistant, content=reply)

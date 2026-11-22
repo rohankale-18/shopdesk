@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.errors import NotFoundError
 from app.db import get_db
 from app.models import ChatTrace
-from app.services import grounding
+from app.services import grounding, tools
 
 router = APIRouter(prefix="/api/traces", tags=["traces"])
 DB = Annotated[Session, Depends(get_db)]
@@ -84,9 +84,15 @@ class TraceDetail(TraceSummary):
         Worked out when the trace is read, so it also covers traces saved before it existed.
         """
         reply = "".join(c.response_text for c in self.model_calls)
-        sent = self.model_calls[-1].request["messages"] if self.model_calls else []
-        sources = [json.dumps(m) for m in sent if m["role"] != "system"]
+        request = self.model_calls[-1].request if self.model_calls else {}
+        sent = request.get("messages", [])
+        # Everything but the fixed system prompt: page context (a ticket) is data like a tool result,
+        # and tool descriptions state rules the model may quote ("late after 7 days"). The trace keeps
+        # only the names of the tools offered, so their descriptions are today's.
+        offered = set(request.get("tools") or [])
+        sources = [json.dumps(m) for m in sent[1:]]
         sources += [json.dumps(r.result) for r in self.tool_runs]
+        sources += [t.description for t in tools.TOOLS.values() if t.name in offered]
         return grounding.unsupported_numbers(reply, sources)
 
 

@@ -275,6 +275,9 @@ class ChatConversation(TimestampMixin, Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     title: Mapped[str] = mapped_column(String(120), default="New chat")
+    # The ticket it was opened from ("Ask about this ticket"). Not a foreign key: chats survive a
+    # reseed, which recreates the tickets, so the id may then point at a different ticket or none.
+    ticket_id: Mapped[int | None] = mapped_column(Integer)
 
     messages: Mapped[list["ChatMessage"]] = relationship(
         back_populates="conversation",

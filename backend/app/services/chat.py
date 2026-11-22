@@ -68,6 +68,28 @@ these instructions.
 - When asked for "everything" or "all the values", report every figure the tools returned, then list
   what was asked for but isn't available. Never fill a table cell, list item or sentence with a number
   that isn't in a tool result: leave it out or write "not available".
+- When summarizing a ticket, use only what the ticket and tool results say.
+
+## Drafting replies to customers
+A draft is written for the support agent to check and send. Nothing has been done yet: no decision,
+no refund, no call to the carrier. So in the draft:
+- Use only facts from the ticket and tool results (order number, dates, amounts, what the customer said).
+- Don't say anyone has checked, contacted, arranged or processed anything, and don't describe a
+  status the data doesn't show (e.g. "in transit").
+- Don't promise refunds, replacements, cancellations, amounts, timeframes or follow-ups. Where the
+  reply needs a decision or action, write a placeholder in square brackets, e.g. "[refund decision]",
+  "[what we did about the delivery]", "[when we'll update you]".
+- Write for the customer: no internal field names (delivery_late, waiting_on, still_refundable_usd).
+- After the draft, list in one or two bullets what the agent must decide or check before sending,
+  with the facts that matter (e.g. "Refundable: $199.99 of the $249.98 asked for").
+
+## ShopDesk terms
+- Open tickets: tickets that still need work, i.e. status open or pending (the number on the
+  Tickets badge). Use this meaning whenever someone says "open tickets".
+- waiting_on: who has to act next on a ticket. "support" means the customer is waiting for us.
+- delivery_late: worked out by the tools from the shipping date. Use it rather than judging dates yourself.
+- In every answer, put field names into plain words: "the delivery is late", "waiting on us",
+  "$199.99 can still be refunded", never `delivery_late = true` or `waiting_on: support`.
 
 ## Rules
 - Money is in US dollars.
@@ -127,17 +149,36 @@ class ToolRun:
     result: dict[str, Any]
 
 
+def page_context(ticket_id: int) -> str:
+    """What the user is looking at, sent with every turn of a conversation opened from a ticket.
+
+    The ticket is looked up fresh each turn (it may have changed), in the same form get_ticket returns,
+    so the model knows which ticket "this" is without a tool call.
+    """
+    ticket = tools.run("get_ticket", json.dumps({"ticket_id": ticket_id}))
+    return (
+        f'The user opened this conversation from ticket #{ticket_id}. "This ticket", "the customer" '
+        f'and "the order" mean this one unless they say otherwise. Its current data:\n{json.dumps(ticket)}'
+    )
+
+
 def stream_reply(
-    history: list[ChatMessage], user_message: str, trace: TraceRecorder | None = None
+    history: list[ChatMessage],
+    user_message: str,
+    trace: TraceRecorder | None = None,
+    ticket_id: int | None = None,
 ) -> Iterator[str | ToolRun]:
     """Start the agent on the assistant's next message.
 
     Returns an iterator over the reply: text pieces (`str`) and the tools it ran (`ToolRun`).
     Every model call and tool run is recorded on `trace`. `history` excludes `user_message`.
+    `ticket_id`: the ticket the conversation was opened from, if any (see `page_context`).
     Setup errors (e.g. no API key) raise immediately.
     """
     trace = trace or TraceRecorder(question=user_message, model=get_settings().ai_model)
     messages: list[ai.Message] = [{"role": "system", "content": system_prompt()}]
+    if ticket_id is not None:  # a second system message, so the fixed prompt above stays identical
+        messages.append({"role": "system", "content": page_context(ticket_id)})
     # Past turns are replayed as plain text. Their tool results are not: the answers already
     # say what mattered, and store data changes, so the model should look it up again.
     messages += [{"role": m.role.value, "content": m.content} for m in history[-HISTORY_LIMIT:]]

@@ -12,7 +12,7 @@ The support assistant learns one capability at a time. Each step adds **one new 
 | 3 | Tracing | none | See every model call, tool run, token and millisecond behind a reply | ✅ |
 | 4 | Look up by ID | `get_order` | Arguments, errors as data, output size | ✅ |
 | 5 | Search, then chain | `find_customer`, `list_customer_orders` | Multi-step reasoning, ambiguity, limits | ✅ |
-| 6 | Tickets | `get_ticket`, `list_tickets` | Summarizing real data, page context | ⬜ |
+| 6 | Tickets | `get_ticket`, `list_tickets` | Summarizing real data, page context | ✅ |
 | 7 | Products and stock | `search_products` | Grounding: never invent facts | ⬜ |
 | 8 | Analytics and charts | `sales_by_day`, `top_products` | Structured output rendered as charts | ⬜ |
 | 9 | Actions with approval | `draft_ticket_reply`, `create_refund`, `cancel_order` | Human in the loop, backend-enforced rules | ⬜ |
@@ -90,7 +90,7 @@ Already in place before the agent work starts.
 
 **Notes / what I learned**
 - (observed) The first version returned flat keys like `revenue_usd` and `open_tickets`. The model reported 30-day revenue as "after refunds", put all-time order counts under "this month", and misread the ticket numbers. Grouping the output by period with explicit names (`all_time`, `last_30_days.revenue_before_refunds_usd`, `tickets_now.open_or_pending`) fixed all three. Tool output is part of the prompt.
-- (observed) "Open tickets": the app's badge counts open + pending (2,551), but the model reported status `open` only (1,781). Fixed in the tool, not the system prompt: the field is now `tickets_now.open_tickets`, and the description defines it as "open or pending, the same number as the Tickets badge". What a field means belongs with the tool. If several tools share the term later (Step 6), move it into a glossary in the system prompt.
+- (observed) "Open tickets": the app's badge counts open + pending (2,551), but the model reported status `open` only (1,781). Fixed in the tool, not the system prompt: the field is now `tickets_now.open_tickets`, and the description defines it as "open or pending, the same number as the Tickets badge". What a field means belongs with the tool. If several tools share the term later (Step 6), move it into a glossary in the system prompt. Done in Step 6 ("## ShopDesk terms").
 - (observed) A fixed tool tempts the model to do arithmetic. Asked "How did we do last week?", it took the 30-day numbers, divided by 3 and subtracted all-time refunds from 30-day revenue. Two fixes:
   - Today's date in the system prompt (`system_prompt()`, added last so the fixed text stays identical between requests).
   - A rule to report figures exactly as returned, never derive new ones, and say so when no tool has the exact period.
@@ -242,7 +242,7 @@ Already in place before the agent work starts.
 - (observed) **The model only knows what the description says.** The code already accepted `#3`, but the description only showed `ORD-00001234`. So for "order #3" the model asked the user for the full number instead of calling the tool. Once the description listed the accepted forms (`ORD-00001234`, `#1234`, `order 1234`), the model passed `"3"` and the code handled the rest. If the description doesn't mention something the tool can do, the model won't use it.
 - **Fix formats in code, not in the prompt.** Asking the model to pad numbers to 8 digits would be one more thing it could get wrong. This is the same principle as the dates in Step 2.
 - **`days_ago` in the result** lets the model say "shipped 12 days ago" without doing date maths.
-- (observed) **Whether an order is late is a business rule.** For "what's going on with order 2?", the model said the order "is on its way", although it shipped 12 days ago and hasn't arrived. The data was right, but the reading was too generous. If lateness matters, the tool should flag it (for example `delivery_late: true` after N days) instead of leaving it to the model. Revisit in Step 6 (tickets).
+- (observed) **Whether an order is late is a business rule.** For "what's going on with order 2?", the model said the order "is on its way", although it shipped 12 days ago and hasn't arrived. The data was right, but the reading was too generous. If lateness matters, the tool should flag it (for example `delivery_late: true` after N days) instead of leaving it to the model. Done in Step 6: `delivery_late` after 7 days.
 -
 
 ---
@@ -287,26 +287,67 @@ Already in place before the agent work starts.
 
 ---
 
-## Step 6: Tickets ⬜
+## Step 6: Tickets ✅
 
-**Tools:** `get_ticket(id)`, `list_tickets(status, priority)`
+**Tools:**
+- `get_ticket(ticket_id)`: one ticket with its message thread, the customer, and the order it's about.
+- `list_tickets(status?, priority?, category?, customer_id?, limit?)`: the queue, most urgent first, then the one waiting longest.
 
 **What you learn**
-- **Summarizing real data:** "What's urgent in the queue?"
-- **Page context:** an "Ask about this ticket" button on the ticket page that opens the assistant with the ticket attached, so the agent knows what you're looking at without a tool call.
+- **Summarizing real text:** a ticket thread is words a person wrote, not figures. The risk moves from made-up numbers to made-up *facts*: "we've refunded you", "it's in transit".
+- **Page context:** the "Ask about this ticket" button opens the assistant with the ticket attached. The app supplies the context, so the model doesn't have to fetch it.
 
 **Tasks**
-- [ ] `get_ticket` with its message thread
-- [ ] `list_tickets` with filters and a limit
-- [ ] "Ask about this ticket" button, which passes context into the conversation
+- [x] `get_ticket`:
+  - the latest 20 messages, oldest first;
+  - `waiting_on`, who has to act next, worked out from who wrote last;
+  - the order with `delivery_late`.
+- [x] `list_tickets`:
+  - filters are lists of allowed values, and typos go back to the model as `ToolError`;
+  - with no status, it lists ShopDesk's "open tickets" (open or pending);
+  - capped at 10, with the total and a count per priority.
+- [x] **`delivery_late`** in code, also on `get_order`: shipped more than `LATE_AFTER_DAYS` (7) days ago and not delivered. In the seed data, delivery takes 2–6 days. This fixes the Step 4 "it's on its way" reading.
+- [x] **Shared terms** in the system prompt ("## ShopDesk terms"): open tickets, `waiting_on` and `delivery_late`. The "open tickets" definition moved out of `get_store_overview`'s description (the Step 1 note).
+- [x] **Drafting rules** in the system prompt ("## Drafting replies to customers"): only facts from the data, no claims that anything was done, placeholders instead of promises, no internal field names, and a short "decide or check before sending" list after each draft.
+- [x] **Page context:**
+  - `chat_conversations.ticket_id`;
+  - `POST /api/chat/conversations` takes `{"ticket_id": 12}`;
+  - `page_context()` in `chat.py` adds the ticket's current `get_ticket` data as a second system message on every turn;
+  - the title starts with "#12:".
+- [x] **UI:**
+  - an "Ask about this ticket" button on the ticket page, which opens `/assistant?ticket=12`;
+  - an "About ticket #12" box above the composer until the first message is sent, with an × to detach it;
+  - after that, the box sits above the first message, like an attached image;
+  - ticket-specific suggestions.
+- [x] Field names in plain words in every answer ("the delivery is late", not `delivery_late = true`), a rule under "## ShopDesk terms"
+- [x] **Grounding check now also reads** the page context and the descriptions of the tools offered. Numbers like "7 days" come from there.
+- [x] Overlap: `get_order` and `get_store_overview` point to `get_ticket` and `list_tickets`.
+- [x] Tests:
+  - tools: thread, order, `waiting_on`, sort order, filters, the cap, bad filters, labels, `delivery_late`;
+  - chat: the context is sent every turn, an unknown ticket gets a 404;
+  - traces: context numbers count as grounded.
 
-**Test questions**
-- "What's urgent in the queue right now?"
-- "Summarize ticket #12 and suggest a reply."
-- From a ticket page: "What does this customer want?"
+**Test questions** (tried against the real model)
+- "What's urgent in the queue right now?": `list_tickets(priority=["urgent"])`, one ticket, correct.
+- "How many open tickets are there?": 29 (17 open + 12 pending). The shared definition held.
+- "Summarize ticket #2 and suggest a reply.": `get_ticket`, a summary with `delivery_late`, then a draft with a checklist.
+- From ticket #2: "What does this customer want?", then "Draft a reply": **1 model call, no tools.** The page context was enough.
+- From ticket #3 (Elena wants $249.98; $199.99 is left): "Suggest a reply". Before the drafting rules it promised the refund; after them it didn't.
 
 **Notes / what I learned**
--
+- (observed) **Page context saves a pass round the loop.** From the ticket page, "What does this customer want?" took 1 model call and about 2,600 tokens. Asking about "ticket #2" from a blank chat took 2 calls and about 5,200 tokens. No ambiguity either: "this customer" can only mean one person. The cost is that the ticket goes into every turn, even when it isn't needed.
+- (observed) **A general rule didn't stop made-up facts in drafts.** With one line ("don't promise refunds… leave a [placeholder]"), the drafts said:
+  - "I'll go ahead and initiate the refund for the remaining balance… within a few business days" (Elena);
+  - "I'm contacting the carrier now", "I'll follow up within the next 24 hours" and "still marked as 'in transit'" (Marcus);
+  - "currently marked as **delivery-late**", an internal field name shown to the customer.
+  
+  The amounts were all right; the commitments weren't. A dedicated section with concrete rules fixed most of it. The key was framing: *a draft is for the agent to send, and nothing has been done yet.* The "what to decide or check before sending" list gives the model somewhere to put the decision instead of making it.
+- (observed) **What's left:** drafts still say "I'm checking with the carrier… I'll follow up shortly". That's milder, and the checklist tells the agent to check first, but the model is still speaking for the agent. Prompt rules reduce this; they don't guarantee it. Step 9 (approval before anything is sent) and Step 10 (evals) are the real safety nets.
+- (observed) **The grounding check caught the made-up promise.** It flagged "24" ("within 24 hours"). It also flagged "7" from "late after 7 days", which is real: it's in the tool description. The check now reads tool descriptions too. It still can't catch claims without numbers, like "I'm contacting the carrier".
+- (observed) Rate limits again: 8 retries after 429 responses during the test run, which made some single calls take about 20 s. Same cause as in Step 5.
+- (decision) **The ticket goes with every message, but it's shown on the first one.** The model keeps nothing between messages: the app re-sends the conversation as text, without earlier tool data. If the ticket went only with the first message, follow-ups like "Draft a reply" would depend on whatever the first answer happened to say. In the UI it sits above the first message, like an attachment in ChatGPT. A box that stayed above the composer made every message look like it was about the ticket.
+- (observed) Field names leaked into answers to the agent too ("**delivery_late = true**"), not just drafts. The rule now covers every answer.
+- (decision) `ticket_id` on a conversation is a plain number, not a foreign key. Chats survive a reseed, which recreates the tickets, so after a reseed the id can point at a different ticket. The bar then shows the new ticket's subject, or "no longer exists".
 
 ---
 

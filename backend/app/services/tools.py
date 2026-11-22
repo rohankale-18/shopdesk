@@ -17,11 +17,19 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
-from app.models import Customer, Order, Ticket
+from app.models import (
+    Customer,
+    MessageAuthor,
+    Order,
+    Ticket,
+    TicketCategory,
+    TicketPriority,
+    TicketStatus,
+)
 from app.services.stats import sales_totals, store_overview
 
 logger = logging.getLogger("shopdesk.tools")
@@ -178,6 +186,17 @@ def _day(when: datetime | None, today: date) -> dict[str, Any] | None:
     return None if when is None else {"on": when.date().isoformat(), "days_ago": (today - when.date()).days}
 
 
+# Delivery takes 2-6 days after shipping. Past this, the order counts as late. It's a business
+# rule, so it lives here: left to itself, the model called an order shipped 12 days ago "on its way".
+LATE_AFTER_DAYS = 7
+
+
+def _delivery_late(order: Order, today: date) -> bool:
+    if order.shipped_at is None or order.delivered_at is not None:
+        return False
+    return (today - order.shipped_at.date()).days > LATE_AFTER_DAYS
+
+
 def get_order(db: Session, order_number: str) -> dict[str, Any]:
     number = normalize_order_number(order_number)
     order = db.scalar(select(Order).where(Order.number == number))
@@ -192,6 +211,7 @@ def get_order(db: Session, order_number: str) -> dict[str, Any]:
         "placed": _day(order.placed_at, today),
         "shipped": _day(order.shipped_at, today),
         "delivered": _day(order.delivered_at, today),
+        "delivery_late": _delivery_late(order, today),
         "tracking_number": order.tracking_number,
         "items": [
             {
@@ -292,6 +312,139 @@ def list_customer_orders(db: Session, customer_id: Any) -> dict[str, Any]:
     }
 
 
+MESSAGES_SHOWN = 20  # the latest ones; long threads are rare, and their start matters less
+TICKETS_SHOWN = 10
+PRIORITY_RANK = {p: i for i, p in enumerate(reversed(TicketPriority))}  # urgent first
+
+
+def _waiting_on(ticket: Ticket) -> str | None:
+    """Who has to act next: whoever didn't write the last message. None once it's done."""
+    if ticket.status in (TicketStatus.resolved, TicketStatus.closed):
+        return None
+    authors = [m.author for m in ticket.messages if m.author != MessageAuthor.system]
+    return "support" if not authors or authors[-1] == MessageAuthor.customer else "customer"
+
+
+def get_ticket(db: Session, ticket_id: Any) -> dict[str, Any]:
+    try:
+        ticket = db.get(Ticket, int(ticket_id))
+    except (TypeError, ValueError):
+        ticket = None
+    if ticket is None:
+        raise ToolError(f"There is no ticket {ticket_id!r}. Check the number with the user.")
+    today = datetime.now(UTC).date()
+    order = ticket.order
+    messages = ticket.messages[-MESSAGES_SHOWN:]
+    result: dict[str, Any] = {
+        "id": ticket.id,
+        "subject": ticket.subject,
+        "status": ticket.status,
+        "priority": ticket.priority,
+        "category": ticket.category,
+        "assignee": ticket.assignee,
+        "opened": _day(ticket.created_at, today),
+        "waiting_on": _waiting_on(ticket),
+        "customer": {
+            "id": ticket.customer_id,
+            "name": ticket.customer.name,
+            "email": ticket.customer.email,
+            "tier": ticket.customer.tier,
+        },
+        "order": order
+        and {
+            "number": order.number,
+            "status": order.status,
+            "placed": _day(order.placed_at, today),
+            "shipped": _day(order.shipped_at, today),
+            "delivered": _day(order.delivered_at, today),
+            "delivery_late": _delivery_late(order, today),
+            "total_usd": _usd(order.total_cents),
+            "refunded_usd": _usd(order.refunded_cents),
+            "still_refundable_usd": _usd(order.refundable_cents),
+        },
+        "messages": [{"from": m.author, "sent": _day(m.created_at, today), "text": m.body} for m in messages],
+    }
+    if len(ticket.messages) > len(messages):
+        result["earlier_messages_not_shown"] = len(ticket.messages) - len(messages)
+    return result
+
+
+def _enum_values(values: Any, enum: type, name: str) -> list[str]:
+    """Check a list of filter values against the allowed ones, so a typo can be fixed by the model."""
+    if values is None:
+        return []
+    values = [values] if isinstance(values, str) else list(values)
+    allowed = [e.value for e in enum]
+    bad = [v for v in values if v not in allowed]
+    if bad:
+        raise ToolError(f"{name} can only be {', '.join(allowed)}; got {bad}.")
+    return values
+
+
+def list_tickets(
+    db: Session,
+    status: Any = None,
+    priority: Any = None,
+    category: Any = None,
+    customer_id: Any = None,
+    limit: Any = TICKETS_SHOWN,
+) -> dict[str, Any]:
+    # No status means ShopDesk's "open tickets": everything that still needs work.
+    statuses = _enum_values(status, TicketStatus, "status") or [TicketStatus.open, TicketStatus.pending]
+    priorities = _enum_values(priority, TicketPriority, "priority")
+    categories = _enum_values(category, TicketCategory, "category")
+    try:
+        limit = max(1, min(int(limit), TICKETS_SHOWN))
+    except (TypeError, ValueError):
+        raise ToolError(f"limit must be a number from 1 to {TICKETS_SHOWN}.") from None
+
+    where = [Ticket.status.in_(statuses)]
+    if priorities:
+        where.append(Ticket.priority.in_(priorities))
+    if categories:
+        where.append(Ticket.category.in_(categories))
+    if customer_id is not None:
+        where.append(Ticket.customer_id == customer_id)
+
+    by_priority = dict(
+        db.execute(select(Ticket.priority, func.count()).where(*where).group_by(Ticket.priority)).all()
+    )
+    total = sum(by_priority.values())
+    # Most urgent first; within a priority, the one waiting longest first.
+    rank = case(PRIORITY_RANK, value=Ticket.priority)
+    tickets = db.scalars(select(Ticket).where(*where).order_by(rank, Ticket.created_at).limit(limit)).all()
+    today = datetime.now(UTC).date()
+    return {
+        "total_matches": total,
+        "by_priority": {p.value: by_priority.get(p, 0) for p in reversed(TicketPriority)},
+        "showing": f"the {len(tickets)} most urgent, oldest first"
+        if total > len(tickets)
+        else f"all {total}",
+        "tickets": [
+            {
+                "id": t.id,
+                "subject": t.subject,
+                "status": t.status,
+                "priority": t.priority,
+                "category": t.category,
+                "customer": t.customer.name,
+                "order": t.order.number if t.order else None,
+                "opened": _day(t.created_at, today),
+                "waiting_on": _waiting_on(t),
+            }
+            for t in tickets
+        ],
+    }
+
+
+def _tickets_label(a: dict[str, Any]) -> str:
+    filters = [a.get("status") or "open, pending", a.get("priority"), a.get("category")]
+    text = "; ".join(", ".join(f) if isinstance(f, list) else str(f) for f in filters if f)
+    if a.get("customer_id") is not None:
+        text += f"; customer {a['customer_id']}"
+    return f"Looked up tickets ({text})"
+
+
 # ---------- the registry ----------
 
 
@@ -329,12 +482,10 @@ TOOLS = {
                 "Store-wide headline numbers. All time: customer, product and order counts, orders by "
                 "status, revenue after refunds, total refunded. Last 30 days: orders placed and revenue "
                 "(before refunds). Right now: open tickets and tickets by status, low-stock products. "
-                "In ShopDesk, 'open tickets' means tickets that still need work: status open or pending "
-                "(the same number as the Tickets badge in the app). When asked how many tickets are "
-                "open, answer with open_tickets; give the by_status breakdown only if it helps. "
                 "Use it for questions like 'How are we doing?' or 'How many open tickets are there?'. "
                 "For sales in a specific period (last week, last 10 days, a month...), use get_sales. "
-                "It has no details about individual orders (use get_order), customers or tickets."
+                "It has no details about individual orders (use get_order), customers or tickets "
+                "(use list_tickets or get_ticket)."
             ),
             parameters=NO_ARGUMENTS,
             run=get_store_overview,
@@ -371,8 +522,10 @@ TOOLS = {
             label=lambda a: f"Looked up order {a['order_number']}",
             description=(
                 "One order by its number: status, customer, when it was placed, shipped and delivered "
-                "(with days ago), tracking number, items, total, refunds and what can still be "
-                "refunded, and any support tickets about it. Use it whenever the user refers to a "
+                f"(with days ago), delivery_late (shipped more than {LATE_AFTER_DAYS} days ago and not "
+                "delivered), tracking number, items, total, refunds and what can still be "
+                "refunded, and any support tickets about it (get_ticket has a ticket's messages). "
+                "Use it whenever the user refers to a "
                 "specific order by number, in any form: ORD-00001234, #1234, 'order 1234'. It can't "
                 "search: without a number, ask the user for one."
             ),
@@ -429,6 +582,61 @@ TOOLS = {
                 "required": ["customer_id"],
             },
             run=list_customer_orders,
+        ),
+        Tool(
+            name="get_ticket",
+            label=lambda a: f"Looked up ticket #{a['ticket_id']}",
+            description=(
+                "One support ticket by its number, with the full conversation (oldest message first): "
+                "subject, status, priority, category, assignee, when it was opened, waiting_on (who "
+                "has to act next: 'support' or 'customer'), the customer, and the order it's about "
+                "(status, dates, delivery_late, total, what can still be refunded). Use it to "
+                "summarize a ticket, work out what the customer wants, or draft a reply. For the "
+                "order's items or tracking number, use get_order."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "ticket_id": {"type": "integer", "description": "The ticket number, e.g. 12 for '#12'."}
+                },
+                "required": ["ticket_id"],
+            },
+            run=get_ticket,
+        ),
+        Tool(
+            name="list_tickets",
+            label=_tickets_label,
+            description=(
+                "The support queue: tickets matching the filters, most urgent first and then the one "
+                f"waiting longest. Returns up to {TICKETS_SHOWN} tickets (subject, status, priority, "
+                "category, customer, order, when opened, waiting_on), the total that match, and how "
+                "many there are of each priority. Without a status it lists the open tickets (open "
+                "or pending). Use it for 'what's urgent?', 'what's in the queue?' or a customer's "
+                "tickets (customer_id from find_customer). For one ticket's messages, use get_ticket."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": [s.value for s in TicketStatus]},
+                        "description": "Optional. Default: open and pending (the open tickets).",
+                    },
+                    "priority": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": [p.value for p in TicketPriority]},
+                        "description": "Optional, e.g. ['urgent', 'high'].",
+                    },
+                    "category": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": [c.value for c in TicketCategory]},
+                        "description": "Optional.",
+                    },
+                    "customer_id": {"type": "integer", "description": "Optional: only this customer's."},
+                    "limit": {"type": "integer", "description": f"How many to show, 1 to {TICKETS_SHOWN}."},
+                },
+            },
+            run=list_tickets,
         ),
     ]
 }

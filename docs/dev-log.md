@@ -152,6 +152,32 @@ Each entry covers:
 
 ---
 
+## 2026-11-22 · Tickets and page context (Step 6)
+
+**Done:**
+- **`get_ticket(ticket_id)`:** the thread, the customer, the order, and `waiting_on` (who has to act next).
+- **`list_tickets(...)`:** the queue, most urgent first, then the one waiting longest. It's capped at 10, with a count per priority.
+- **`delivery_late`, worked out in code** (shipped more than 7 days ago and not delivered), also on `get_order`.
+- **"## ShopDesk terms"** in the system prompt: open tickets, `waiting_on`, `delivery_late`.
+- **"## Drafting replies to customers":** only facts from the data, nothing claimed as done, placeholders instead of promises, a checklist after the draft.
+- **Page context:**
+  - an "Ask about this ticket" button on the ticket page;
+  - the conversation remembers the ticket (`ticket_id`), and the ticket's current data goes into the prompt on every turn;
+  - in the assistant, the ticket appears above the first message, like an attached image; before sending, it sits above the message box with an ×.
+- **The grounding check also reads** the page context and the tool descriptions.
+
+**Why:** support work is mostly tickets. A ticket is text a person wrote, so this is the first step where the model has to understand and summarize rather than report numbers.
+
+**Learned:**
+- **Page context halves the cost:** 1 call instead of 2, and no ambiguity about which ticket.
+- **One general prompt rule didn't stop made-up facts in drafts.** They promised a refund ("I'll initiate the refund…"), invented actions ("contacting the carrier now"), and showed an internal field name. Concrete rules plus the framing "nothing has been done yet" fixed most of it. Some soft claims are left for Steps 9 and 10.
+- **The grounding check catches invented numbers** ("within 24 hours"), **but not invented actions without numbers.**
+- **Context goes with every message; the UI shows it once.** The model keeps nothing between messages, so the ticket is re-sent each turn. The screen shows it on the first message, so the chat doesn't look like every question is about the ticket.
+
+**Where:** `backend/app/services/tools.py`, `backend/app/services/chat.py` (prompt, `page_context`), `backend/app/routers/chat.py`, `frontend/src/pages/TicketDetail.tsx`, `frontend/src/pages/Assistant.tsx`
+
+---
+
 ## Not committed yet
 
 Nothing yet.

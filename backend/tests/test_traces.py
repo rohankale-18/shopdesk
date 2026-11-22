@@ -143,3 +143,15 @@ def test_a_trace_flags_numbers_no_tool_returned(client, script):
     ]
     ask(client, "How many tickets are open, and how many were resolved last month?")
     assert latest_trace(client)["unsupported_numbers"] == ["9876"]  # the real count passes
+
+
+def test_numbers_from_page_context_and_tool_descriptions_are_grounded(client, script):
+    """A ticket chat's context is data the model was given, and so is a rule in a tool description."""
+    shipped = tools.run("get_ticket", '{"ticket_id": 2}')["order"]["shipped"]["days_ago"]
+    reply = (
+        f"It shipped {shipped} days ago, so it's late (after {tools.LATE_AFTER_DAYS} days). 4321 is made up."
+    )
+    script += [[reply, end(1400, 20, 5, "", "stop")]]
+    cid = client.post("/api/chat/conversations", json={"ticket_id": 2}).json()["id"]
+    client.post(f"/api/chat/conversations/{cid}/messages", json={"content": "What's this about?"}).read()
+    assert latest_trace(client)["unsupported_numbers"] == ["4321"]
