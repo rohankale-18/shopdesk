@@ -239,6 +239,9 @@ class Ticket(TimestampMixin, Base):
         _enum(TicketCategory, "ticket_category"), default=TicketCategory.other
     )
     assignee: Mapped[str | None] = mapped_column(String(80))
+    # A reply waiting in the ticket's reply box (put there by an approved assistant draft).
+    # Cleared when an agent replies.
+    draft_reply: Mapped[str | None] = mapped_column(Text)
 
     customer: Mapped[Customer] = relationship(back_populates="tickets")
     order: Mapped[Order | None] = relationship()
@@ -285,6 +288,9 @@ class ChatConversation(TimestampMixin, Base):
         order_by="ChatMessage.id",
     )
     traces: Mapped[list["ChatTrace"]] = relationship(cascade="all, delete-orphan", passive_deletes=True)
+    actions: Mapped[list["ChatAction"]] = relationship(
+        cascade="all, delete-orphan", passive_deletes=True, order_by="ChatAction.id"
+    )
 
 
 class ChatMessage(Base):
@@ -384,3 +390,34 @@ class ChatToolRun(Base):
     result: Mapped[str] = mapped_column(Text)  # JSON, exactly as the model received it
     is_error: Mapped[bool] = mapped_column(Boolean, default=False)
     duration_ms: Mapped[int] = mapped_column(Integer)
+
+
+class ActionStatus(StrEnum):
+    pending = "pending"  # proposed by the assistant, waiting for a person
+    done = "done"  # approved and carried out
+    rejected = "rejected"
+    failed = "failed"  # approved, but the store's rules refused it (e.g. already refunded)
+
+
+class ChatAction(Base):
+    """Something the assistant proposed to change. Nothing happens until a person approves it.
+
+    The arguments are checked again on approval, because the data may have changed since.
+    Orders are kept by number, not id: chats survive a reseed, and the check then fails cleanly.
+    """
+
+    __tablename__ = "chat_actions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("chat_conversations.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(32))  # create_refund, cancel_order, draft_ticket_reply
+    arguments: Mapped[str] = mapped_column(Text)  # JSON, already checked (amounts in cents)
+    summary: Mapped[str] = mapped_column(String(300))  # the card's title, e.g. "Refund $199.99 on ..."
+    status: Mapped[ActionStatus] = mapped_column(
+        _enum(ActionStatus, "action_status"), default=ActionStatus.pending
+    )
+    outcome: Mapped[str | None] = mapped_column(Text)  # what happened, or why it failed
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    decided_at: Mapped[datetime | None] = mapped_column(UTCDateTime())

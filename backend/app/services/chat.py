@@ -115,6 +115,13 @@ With a chart, write a short summary first (the totals the tool returned), then t
 - Never write the rows' numbers into the block or repeat them all in a table: the app draws them from the
   tool result. Mention only the figures that matter (totals, the highest, the lowest).
 
+## Actions
+create_refund, cancel_order and draft_ticket_reply only *propose* a change: the user approves or
+rejects it on a card in the chat. Use them only when the user asks for that change, never on your
+own initiative, and look up the order or ticket first. After proposing, say what you proposed and
+that it's waiting for their approval. Never say an action is done unless the actions list says "done".
+If an action tool returns an error (e.g. more than can be refunded), explain it; don't try another amount.
+
 ## Rules
 - Money is in US dollars.
 - Be concise. Use short paragraphs or bullet lists. Use Markdown for formatting.
@@ -191,12 +198,15 @@ def stream_reply(
     user_message: str,
     trace: TraceRecorder | None = None,
     ticket_id: int | None = None,
+    conversation_id: int | None = None,
+    action_notes: str | None = None,
 ) -> Iterator[str | ToolRun]:
     """Start the agent on the assistant's next message.
 
     Returns an iterator over the reply: text pieces (`str`) and the tools it ran (`ToolRun`).
     Every model call and tool run is recorded on `trace`. `history` excludes `user_message`.
     `ticket_id`: the ticket the conversation was opened from, if any (see `page_context`).
+    `conversation_id`: where proposed actions are filed; `action_notes`: what became of earlier ones.
     Setup errors (e.g. no API key) raise immediately.
     """
     trace = trace or TraceRecorder(question=user_message, model=get_settings().ai_model)
@@ -206,12 +216,15 @@ def stream_reply(
     # Past turns are replayed as plain text. Their tool results are not: the answers already
     # say what mattered, and store data changes, so the model should look it up again.
     messages += [{"role": m.role.value, "content": m.content} for m in history[-HISTORY_LIMIT:]]
+    # Approve / Reject happen between turns, outside the chat: the model only knows if we tell it.
+    if action_notes:
+        messages.append({"role": "system", "content": action_notes})
     messages.append({"role": "user", "content": user_message})
 
     definitions = tools.definitions()
     call = trace.model_call(1, messages, definitions, "auto")
     first = ai.stream(messages, tools=definitions)  # sent now, so setup errors raise here
-    return _agent_loop(messages, first, trace, call)
+    return _agent_loop(messages, first, trace, call, conversation_id)
 
 
 def _agent_loop(
@@ -219,6 +232,7 @@ def _agent_loop(
     response: Iterator[str | ai.ToolCall | ai.StreamEnd],
     trace: TraceRecorder,
     call: ModelCallRecord,
+    conversation_id: int | None = None,
 ) -> Iterator[str | ToolRun]:
     for step in range(1, MAX_STEPS + 1):
         text: list[str] = []
@@ -240,7 +254,7 @@ def _agent_loop(
         messages.append({"role": "assistant", "content": "".join(text), "tool_calls": requested})
         for tool_call in calls:
             started = time.perf_counter()
-            result = tools.run(tool_call.name, tool_call.arguments)
+            result = tools.run(tool_call.name, tool_call.arguments, conversation_id)
             trace.tool_run(step, tool_call.name, tool_call.arguments, result, started)
             yield ToolRun(tool_call.name, tool_call.arguments, result)
             messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": json.dumps(result)})

@@ -441,7 +441,7 @@ Already in place before the agent work starts.
 
 ---
 
-## Step 9: Actions with approval ⬜
+## Step 9: Actions with approval ✅
 
 **Tools, in this order:** `draft_ticket_reply` (low risk, only fills a draft), then `create_refund`, `cancel_order`
 
@@ -451,10 +451,14 @@ Already in place before the agent work starts.
 - **Idempotency:** the same approval must never refund twice.
 
 **Tasks**
-- [ ] Proposed-action flow: the model proposes, the UI shows a card, the user approves, then the backend executes
-- [ ] `draft_ticket_reply`
-- [ ] `create_refund` and `cancel_order` behind approval
-- [ ] Tests: rejected actions do nothing; approved ones run exactly once
+- [x] Proposed-action flow (`app/services/actions.py`, `chat_actions` table):
+  - an action tool checks the request (clear errors for the model), then saves it as `pending`; nothing changes;
+  - the tool result says "Nothing has happened yet", and the chat shows an Approve / Reject card;
+  - `POST /api/chat/actions/{id}/approve` runs it through the normal order/ticket rules; `.../reject` drops it;
+  - each turn, the model gets a system note listing this conversation's actions and what became of them.
+- [x] `draft_ticket_reply`: approving puts the text in the ticket's reply box (`tickets.draft_reply`). Nothing is sent; the ticket page flags `[placeholders]` still to fill in, and has "Discard draft".
+- [x] `create_refund` and `cancel_order` behind approval. Orders are kept by number, and every rule is checked again on approval.
+- [x] Tests (`tests/test_actions.py`): a proposal changes nothing; approve runs once and a second approve gets 409; reject changes nothing; two proposals that only fit one at a time; a failed reply drops its proposals.
 
 **Test questions**
 - Damaged item scenario: priya.sharma@example.com, `ORD-00000001`. Refund the headphones only ($199.99), not the serum.
@@ -462,7 +466,13 @@ Already in place before the agent work starts.
 - Cancel request: james.okafor@example.com, `ORD-00000004`. Paid but not shipped, so cancelling is allowed.
 
 **Notes / what I learned**
--
+- (decision) **Exactly once comes from the database, not the UI.** Approving runs `UPDATE ... SET status='done' WHERE id=? AND status='pending'` in the same transaction as the refund. Only one request can win; a double click, a retry or a second tab gets 409. If the refund fails, the rollback undoes the claim too, so "done" and the refund always go together.
+- (decision) **Check twice.** The tool checks when it proposes (so the model hears "only $199.99 can be refunded" right away), and `orders.refund_order` checks again on approval, because the data can change in between. Tested with two $150 + $100 proposals on $199.99: the second ends up `failed` with the reason.
+- (decision) **The model learns the outcome from a note, not from memory.** Approve / Reject happen between turns, outside the chat. Each turn gets a system message: "#1 Refund $199.99 on ORD-00000001: done (Refunded $199.99...)". Asked "Did it go through?", it answered correctly with what's left ($49.98).
+- (observed) Damaged item: it looked up the order, proposed exactly the headphones ($199.99) with a note, and said it was waiting for approval. Refund limit: it saw `still_refundable_usd` and asked before proposing anything. Cancel: it proposed straight away, with the total.
+- (observed) **A draft gave the wrong amount:** "the refund of $49.98", which is what was *left*; $199.99 was refunded. The ticket's order data had only the two totals side by side. Adding the refunds list (like `get_order` has) fixed it on the next run. The card shows the full draft, so a person would have caught it: this is what approval is for.
+- (observed) **Groq rate-limited the reply after the draft was proposed.** A failed reply isn't saved, so its card never showed, but the action stayed pending. Now a failed or stopped reply drops its proposals.
+- (observed) What's left: drafts still promise timeframes ("should appear within a few business days") despite the drafting rules. That goes into Step 10's evals.
 
 ---
 

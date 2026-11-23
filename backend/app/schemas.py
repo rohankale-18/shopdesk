@@ -219,6 +219,7 @@ class TicketUpdate(BaseModel):
     priority: TicketPriority | None = None
     category: TicketCategory | None = None
     assignee: str | None = Field(default=None, max_length=80)
+    draft_reply: str | None = Field(default=None, max_length=5000)  # null discards the draft
 
 
 class TicketSummary(ORMModel):
@@ -237,6 +238,7 @@ class TicketSummary(ORMModel):
 class TicketOut(TicketSummary):
     customer: CustomerOut
     messages: list[TicketMessageOut]
+    draft_reply: str | None  # waiting in the reply box (an approved assistant draft)
 
 
 # ---------- Stats ----------

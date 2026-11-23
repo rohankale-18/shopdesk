@@ -104,7 +104,7 @@ def get_ticket(db: DB, ticket_id: int):
 
 @router.patch("/{ticket_id}", response_model=TicketOut)
 def update_ticket(db: DB, ticket_id: int, body: TicketUpdate):
-    """Change status, priority, category or assignee."""
+    """Change status, priority, category or assignee, or set or discard (null) the draft reply."""
     t = _get(db, ticket_id)
     for k, v in body.model_dump(exclude_unset=True).items():
         setattr(t, k, v)
@@ -128,6 +128,8 @@ def add_ticket_message(db: DB, ticket_id: int, body: TicketMessageCreate):
         )
     msg = TicketMessage(author=body.author, body=body.body)
     t.messages.append(msg)
+    if body.author == MessageAuthor.agent:
+        t.draft_reply = None  # the draft has been used (or replaced)
     if body.author == MessageAuthor.customer and t.status in (
         TicketStatus.pending,
         TicketStatus.resolved,

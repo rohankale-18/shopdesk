@@ -171,7 +171,12 @@ def test_agent_runs_the_tool_and_answers_with_its_result(client, scripted_model)
     events = send(client, cid, "How many open tickets are there?")
 
     assert [name for name, _ in events] == ["tool", "delta", "delta", "done"]
-    assert events[0][1] == {"name": "get_store_overview", "label": "Looked up store overview", "data": None}
+    assert events[0][1] == {
+        "name": "get_store_overview",
+        "label": "Looked up store overview",
+        "data": None,
+        "action_id": None,
+    }
 
     # First call: the model gets the tool list. Second call: it gets its request and our result.
     first_messages, first_kwargs = calls[0]
@@ -188,7 +193,7 @@ def test_agent_runs_the_tool_and_answers_with_its_result(client, scripted_model)
     reply = client.get(f"/api/chat/conversations/{cid}").json()["messages"][-1]
     assert reply["content"] == "There are N open tickets."
     assert reply["tool_calls"] == [
-        {"name": "get_store_overview", "label": "Looked up store overview", "data": None}
+        {"name": "get_store_overview", "label": "Looked up store overview", "data": None, "action_id": None}
     ]
 
 

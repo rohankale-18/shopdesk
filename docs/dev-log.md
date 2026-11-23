@@ -213,3 +213,23 @@ Each entry covers:
 - **A note in the tool result** ("don't also list these rows in a table") **worked where the prompt rule didn't**, the third time this has happened.
 
 **Where:** `backend/app/services/tools.py` (`sales_over_time`, `top_products`, `chart_data`), `backend/app/services/stats.py`, `backend/app/routers/chat.py`, `frontend/src/components/chat/ChatChart.tsx`, `ChatMarkdown.tsx`
+
+---
+
+## 2026-11-24 · Actions with approval (Step 9)
+
+**Done:**
+- **Three action tools that only propose:** `create_refund`, `cancel_order` and `draft_ticket_reply`. Each checks the request, saves it as a pending action and tells the model "nothing has happened yet".
+- **An Approve / Reject card in the chat.** Approve runs the action through the store's normal rules. It runs exactly once: a second approval gets 409.
+- **The model hears the outcome** in a note each turn, because the click happens outside the chat.
+- **Tickets get a draft reply box:** an approved draft lands there, flags `[placeholders]` still to fill in, and is cleared when an agent replies.
+
+**Why:** the first step where the assistant changes data. A person has to say yes first, and the code, not the model, enforces the rules.
+
+**Learned:**
+- **Exactly once is a database guarantee:** a conditional `UPDATE ... WHERE status = 'pending'` in the same transaction as the change.
+- **Check when proposing and again when approving:** the data can change in between.
+- **Approval caught a real mistake:** a draft called $49.98 (the amount left) "the refund". Sending the refunds list with the ticket fixed it.
+- **A failed reply left an orphan proposal** with no card. Failed or stopped replies now drop their proposals.
+
+**Where:** `backend/app/services/actions.py`, `backend/app/services/tools.py` (action tools), `backend/app/routers/chat.py` (`/api/chat/actions`), `backend/app/models.py` (`ChatAction`, `Ticket.draft_reply`), `frontend/src/components/chat/ActionCard.tsx`, `frontend/src/pages/TicketDetail.tsx`

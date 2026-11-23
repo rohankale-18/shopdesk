@@ -60,7 +60,8 @@ export function TicketDetail() {
       <div className="grid items-start gap-5 lg:grid-cols-[1fr_360px]">
         <div className="grid gap-5">
           <Thread ticket={t} />
-          <Reply ticket={t} />
+          {/* Keyed on the draft, so a newly approved assistant draft replaces what's in the box. */}
+          <Reply key={t.draft_reply ?? ''} ticket={t} />
         </div>
         <aside className="grid gap-5">
           <TicketSettings ticket={t} />
@@ -98,10 +99,13 @@ function Thread({ ticket }: { ticket: Ticket }) {
 }
 
 function Reply({ ticket }: { ticket: Ticket }) {
-  const [body, setBody] = useState('')
+  const [body, setBody] = useState(ticket.draft_reply ?? '')
   const reply = useReplyToTicket()
   const update = useUpdateTicket()
   const closed = ticket.status === 'closed'
+  const fromAssistant = ticket.draft_reply !== null
+  // The assistant writes "[refund decision]" where a person has to decide what to say.
+  const placeholders = body.match(/\[[^\]\n]+\]/g) ?? []
 
   const send = (thenStatus?: TicketStatus) =>
     reply.mutate(
@@ -142,6 +146,19 @@ function Reply({ ticket }: { ticket: Ticket }) {
           aria-label="Reply"
           className="w-full resize-y rounded-md border border-line bg-surface p-3 text-[14px] leading-relaxed placeholder:text-faint focus:border-cobalt focus:outline-none"
         />
+        {fromAssistant && (
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[13px] text-muted-foreground">
+            <span>
+              Drafted by the assistant. Check it before sending.
+              {placeholders.length > 0 && (
+                <span className="text-danger"> Still to fill in: {placeholders.join(', ')}</span>
+              )}
+            </span>
+            <Button type="button" onClick={() => update.mutate({ id: ticket.id, draft_reply: null })}>
+              Discard draft
+            </Button>
+          </div>
+        )}
         <MutationError error={reply.error} />
         <div className="flex flex-wrap gap-2">
           <Button type="submit" variant="primary" disabled={!body.trim() || reply.isPending}>

@@ -8,15 +8,15 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.errors import AppError, NotFoundError
 from app.db import SessionLocal, get_db
-from app.models import ChatConversation, ChatMessage, ChatRole, Ticket, utcnow
-from app.services import tools, tracing
+from app.models import ActionStatus, ChatConversation, ChatMessage, ChatRole, Ticket, utcnow
+from app.services import actions, tools, tracing
 from app.services.chat import EMPTY_REPLY, ToolRun, stream_reply
 from app.services.tracing import TraceRecorder
 
@@ -45,6 +45,30 @@ class ToolCallOut(BaseModel):
     def data(self) -> dict | None:
         """The rows a chart block in the reply can point at (data tools only)."""
         return tools.chart_data(json.loads(self.result))
+
+    @computed_field
+    @property
+    def action_id(self) -> int | None:
+        """The action this tool proposed (action tools only); the chat shows it as a card."""
+        return json.loads(self.result).get("action_id")
+
+
+class ActionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    kind: str
+    summary: str
+    arguments: dict  # e.g. the reply text, the refund reason
+    status: ActionStatus
+    outcome: str | None
+    created_at: datetime
+    decided_at: datetime | None
+
+    @field_validator("arguments", mode="before")
+    @classmethod
+    def _parse(cls, value: str | dict) -> dict:
+        return json.loads(value) if isinstance(value, str) else value
 
 
 class ChatMessageOut(BaseModel):
@@ -139,8 +163,9 @@ def send_message(conversation_id: int, body: SendMessage, db: DB):
     """Send a message; the assistant's reply streams back as Server-Sent Events.
 
     - `delta`: `{"text": "..."}`, the next piece of the reply.
-    - `tool`: `{"name": "...", "label": "...", "data": ...}`, the assistant ran a tool (it may run several).
-      `data` is `{"ref": "...", "rows": [...]}` for tools whose rows a chart can draw, else null.
+    - `tool`: `{"name": "...", "label": "...", "data": ..., "action_id": ...}`, the assistant ran a tool
+      (it may run several). `data` is `{"ref": "...", "rows": [...]}` for tools whose rows a chart can
+      draw, else null. `action_id` is set when the tool proposed an action (see /api/chat/actions).
     - `done`: `{"user_message": ..., "assistant_message": ...}`, both saved. Always last on success.
     - `error`: `{"code": "...", "message": "..."}` if it fails mid-stream. Nothing is saved.
 
@@ -155,13 +180,19 @@ def send_message(conversation_id: int, body: SendMessage, db: DB):
 
     # Starts the model call now, so setup errors still become normal error responses.
     trace = TraceRecorder(question=text, model=get_settings().ai_model)
-    chunks = stream_reply(convo.messages, text, trace, convo.ticket_id)
+    chunks = stream_reply(
+        convo.messages, text, trace, convo.ticket_id, conversation_id, actions.notes(convo.actions)
+    )
     db.close()  # the stream below can take a while; it saves with its own session
 
-    def save_trace_only() -> None:
+    proposed: list[int] = []  # actions proposed during this reply
+
+    def save_failed_turn() -> None:
+        """Keep the trace. Drop the reply's proposals: no message is saved, so no card would show them."""
         with SessionLocal() as session:
             if tracing.save(session, trace, conversation_id):
                 session.commit()
+            actions.drop(session, proposed)
 
     def events() -> Iterator[str]:
         parts: list[str] = []
@@ -170,24 +201,29 @@ def send_message(conversation_id: int, body: SendMessage, db: DB):
                 if isinstance(chunk, ToolRun):
                     label = tools.label(chunk.name, chunk.arguments)
                     data = tools.chart_data(chunk.result)
-                    yield _sse("tool", {"name": chunk.name, "label": label, "data": data})
+                    action_id = chunk.result.get("action_id")
+                    if action_id:
+                        proposed.append(action_id)
+                    yield _sse(
+                        "tool", {"name": chunk.name, "label": label, "data": data, "action_id": action_id}
+                    )
                 else:
                     parts.append(chunk)
                     yield _sse("delta", {"text": chunk})
         except AppError as e:
             trace.fail(e.message)
-            save_trace_only()
+            save_failed_turn()
             yield _sse("error", {"code": e.code, "message": e.message})
             return
         except Exception as e:
             logger.exception("Chat stream failed for conversation %s", conversation_id)
             trace.fail(f"{type(e).__name__}: {e}")
-            save_trace_only()
+            save_failed_turn()
             message = "Something went wrong. Please try again."
             yield _sse("error", {"code": "internal_error", "message": message})
             return
         except GeneratorExit:  # the client went away (Stop button): keep the trace, as "stopped"
-            save_trace_only()
+            save_failed_turn()
             raise
 
         # Save the finished turn. Nothing is written while the model is still talking.
@@ -213,3 +249,28 @@ def send_message(conversation_id: int, body: SendMessage, db: DB):
     # X-Accel-Buffering: no stops nginx (Docker setup) from holding the stream back.
     headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     return StreamingResponse(events(), media_type="text/event-stream", headers=headers)
+
+
+# ---------- proposed actions ----------
+
+
+@router.get("/actions/{action_id}", response_model=ActionOut)
+def get_action(action_id: int, db: DB):
+    """An action the assistant proposed, and what became of it."""
+    return actions.get(db, action_id)
+
+
+@router.post("/actions/{action_id}/approve", response_model=ActionOut)
+def approve_action(action_id: int, db: DB):
+    """Carry out a pending action. It runs at most once: a second approval gets 409.
+
+    If the store's rules refuse it now (e.g. the order was refunded since), it ends up `failed`,
+    with the reason in `outcome`.
+    """
+    return actions.decide(db, action_id, approve=True)
+
+
+@router.post("/actions/{action_id}/reject", response_model=ActionOut)
+def reject_action(action_id: int, db: DB):
+    """Turn down a pending action. Nothing changes."""
+    return actions.decide(db, action_id, approve=False)

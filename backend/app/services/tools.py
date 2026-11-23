@@ -29,11 +29,14 @@ from app.models import (
     Order,
     Product,
     ProductCategory,
+    RefundReason,
     Ticket,
     TicketCategory,
     TicketPriority,
     TicketStatus,
 )
+from app.services import actions
+from app.services.orders import CANCELLABLE, REFUNDABLE
 from app.services.stats import (
     INTERVALS,
     LOW_STOCK,
@@ -215,6 +218,13 @@ def _delivery_late(order: Order, today: date) -> bool:
     return (today - order.shipped_at.date()).days > LATE_AFTER_DAYS
 
 
+def _refunds(order: Order) -> list[dict[str, Any]]:
+    return [
+        {"on": r.created_at.date().isoformat(), "amount_usd": _usd(r.amount_cents), "reason": r.reason}
+        for r in order.refunds
+    ]
+
+
 def get_order(db: Session, order_number: str) -> dict[str, Any]:
     number = normalize_order_number(order_number)
     order = db.scalar(select(Order).where(Order.number == number))
@@ -243,10 +253,7 @@ def get_order(db: Session, order_number: str) -> dict[str, Any]:
         "total_usd": _usd(order.total_cents),
         "refunded_usd": _usd(order.refunded_cents),
         "still_refundable_usd": _usd(order.refundable_cents),
-        "refunds": [
-            {"on": r.created_at.date().isoformat(), "amount_usd": _usd(r.amount_cents), "reason": r.reason}
-            for r in order.refunds
-        ],
+        "refunds": _refunds(order),
         "tickets": [{"id": t.id, "subject": t.subject, "status": t.status} for t in tickets],
     }
 
@@ -379,6 +386,9 @@ def get_ticket(db: Session, ticket_id: Any) -> dict[str, Any]:
             "total_usd": _usd(order.total_cents),
             "refunded_usd": _usd(order.refunded_cents),
             "still_refundable_usd": _usd(order.refundable_cents),
+            # Each refund separately: with only the two totals, a draft once called the amount
+            # left ($49.98) "the refund" instead of what was refunded ($199.99).
+            "refunds": _refunds(order),
         },
         "messages": [{"from": m.author, "sent": _day(m.created_at, today), "text": m.body} for m in messages],
     }
@@ -627,6 +637,91 @@ def chart_data(result: dict[str, Any]) -> dict[str, Any] | None:
     return {"ref": result["data_ref"], "rows": result["rows"]}
 
 
+# ---------- actions: proposed here, carried out only when a person approves (actions.py) ----------
+
+PROPOSED = (
+    "Nothing has happened yet: this is only a proposal. Tell the user in one sentence what you "
+    "proposed and that they can approve or reject it on the card below. Never say it is done."
+)
+
+
+def _proposal(db: Session, conversation_id: int, kind: str, arguments: dict[str, Any], summary: str) -> dict:
+    action = actions.propose(db, conversation_id, kind, arguments, summary)
+    return {
+        "action_id": action.id,
+        "status": "waiting_for_approval",
+        "proposed": summary,
+        "next_step": PROPOSED,
+    }
+
+
+def _order_for_action(db: Session, order_number: Any) -> Order:
+    number = normalize_order_number(order_number)
+    order = db.scalar(select(Order).where(Order.number == number))
+    if order is None:
+        raise ToolError(f"There is no order {number}. Check the number with the user.")
+    return order
+
+
+def create_refund(
+    db: Session, conversation_id: int, order_number: str, amount_usd: Any, reason: str, note: str = ""
+) -> dict[str, Any]:
+    order = _order_for_action(db, order_number)
+    if order.status not in REFUNDABLE:
+        raise ToolError(
+            f"{order.number} is {order.status}: only paid, shipped or delivered orders can be refunded."
+        )
+    try:
+        cents = round(float(amount_usd) * 100)
+    except (TypeError, ValueError):
+        raise ToolError(f"amount_usd must be a number, got {amount_usd!r}.") from None
+    if cents <= 0:
+        raise ToolError("amount_usd must be more than 0.")
+    if cents > order.refundable_cents:
+        raise ToolError(
+            f"Only ${_usd(order.refundable_cents):.2f} can still be refunded on {order.number}. "
+            "Tell the user; propose that amount or less only if they ask."
+        )
+    reason = (_enum_values(reason, RefundReason, "reason") or ["other"])[0]
+    arguments = {
+        "order_number": order.number,
+        "amount_cents": cents,
+        "reason": reason,
+        "note": str(note)[:500],
+    }
+    summary = f"Refund ${_usd(cents):.2f} on {order.number} ({reason.replace('_', ' ')})"
+    return _proposal(db, conversation_id, "create_refund", arguments, summary)
+
+
+def cancel_order(db: Session, conversation_id: int, order_number: str) -> dict[str, Any]:
+    order = _order_for_action(db, order_number)
+    if order.status not in CANCELLABLE:
+        raise ToolError(
+            f"{order.number} is {order.status} and can't be cancelled: only pending or paid orders can. "
+            "Shipped or delivered orders can be refunded instead."
+        )
+    summary = f"Cancel {order.number} (${_usd(order.total_cents):.2f}, items go back into stock)"
+    return _proposal(db, conversation_id, "cancel_order", {"order_number": order.number}, summary)
+
+
+def draft_ticket_reply(db: Session, conversation_id: int, ticket_id: Any, body: str) -> dict[str, Any]:
+    try:
+        ticket = db.get(Ticket, int(ticket_id))
+    except (TypeError, ValueError):
+        ticket = None
+    if ticket is None:
+        raise ToolError(f"There is no ticket {ticket_id!r}.")
+    if ticket.status == TicketStatus.closed:
+        raise ToolError(f"Ticket #{ticket.id} is closed, so it can't take a reply.")
+    text = str(body).strip()
+    if not text or len(text) > 5000:
+        raise ToolError("body must be the reply text, 1 to 5000 characters.")
+    summary = f"Put a draft reply in ticket #{ticket.id}'s reply box"
+    return _proposal(
+        db, conversation_id, "draft_ticket_reply", {"ticket_id": ticket.id, "body": text}, summary
+    )
+
+
 def _products_label(a: dict[str, Any]) -> str:
     if a.get("query"):
         return f"Searched products for “{a['query']}”"
@@ -654,6 +749,8 @@ class Tool:
     description: str  # read by the model to decide when (and when not) to call it
     parameters: dict[str, Any]  # JSON schema of the arguments
     run: Callable[..., dict[str, Any]]  # run(db, **arguments) -> result
+    # Action tools change data, so they only propose: run(db, conversation_id, **arguments).
+    action: bool = False
 
 
 NO_ARGUMENTS: dict[str, Any] = {"type": "object", "properties": {}}
@@ -919,6 +1016,64 @@ TOOLS = {
             },
             run=top_products,
         ),
+        Tool(
+            name="draft_ticket_reply",
+            label=lambda a: f"Proposed a draft reply for ticket #{a['ticket_id']}",
+            description=(
+                "Proposes putting a reply into a ticket's reply box. It sends nothing: the user approves "
+                "it on a card, then checks and sends it from the ticket page. Use it when the user asks to "
+                "put, save or add a draft to the ticket, not just to write one (then reply in the chat). "
+                "The body follows the drafting rules, with placeholders in square brackets."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "ticket_id": {"type": "integer"},
+                    "body": {"type": "string", "description": "The reply to the customer, ready to send."},
+                },
+                "required": ["ticket_id", "body"],
+            },
+            run=draft_ticket_reply,
+            action=True,
+        ),
+        Tool(
+            name="create_refund",
+            label=lambda a: f"Proposed a refund on {normalize_order_number(a['order_number'])}",
+            description=(
+                "Proposes a refund. It refunds nothing: the user gets an Approve / Reject card, and the "
+                "refund happens only if they approve. Use it only when the user asks for a refund. Look the "
+                "order up with get_order first: the amount can't be more than still_refundable_usd. To "
+                "refund one item, use that item's line_total_usd."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "order_number": {"type": "string", "description": "e.g. ORD-00000042"},
+                    "amount_usd": {"type": "number"},
+                    "reason": {"type": "string", "enum": [r.value for r in RefundReason]},
+                    "note": {"type": "string", "description": "Optional, e.g. which item and why."},
+                },
+                "required": ["order_number", "amount_usd", "reason"],
+            },
+            run=create_refund,
+            action=True,
+        ),
+        Tool(
+            name="cancel_order",
+            label=lambda a: f"Proposed cancelling {normalize_order_number(a['order_number'])}",
+            description=(
+                "Proposes cancelling an order that hasn't shipped (pending or paid); its items go back "
+                "into stock. It cancels nothing: the user gets an Approve / Reject card. Use it only when "
+                "the user asks to cancel. Shipped or delivered orders can't be cancelled; offer a refund."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {"order_number": {"type": "string", "description": "e.g. ORD-00000042"}},
+                "required": ["order_number"],
+            },
+            run=cancel_order,
+            action=True,
+        ),
     ]
 }
 
@@ -946,16 +1101,21 @@ def label(name: str, arguments: str = "{}") -> str:
         return f"Used {name}"
 
 
-def run(name: str, arguments: str) -> dict[str, Any]:
-    """Run a tool the model asked for. Never raises: problems go back to the model as an error."""
+def run(name: str, arguments: str, conversation_id: int | None = None) -> dict[str, Any]:
+    """Run a tool the model asked for. Never raises: problems go back to the model as an error.
+
+    `conversation_id`: where action tools file their proposals (they need a chat to show the card in).
+    """
     tool = TOOLS.get(name)
     if tool is None:
         result: dict[str, Any] = {"error": f"There is no tool called {name!r}."}
+    elif tool.action and conversation_id is None:
+        result = {"error": f"{name} only works in a saved conversation."}
     else:
         try:
             args = json.loads(arguments or "{}")
             with SessionLocal() as db:
-                result = tool.run(db, **args)
+                result = tool.run(db, conversation_id, **args) if tool.action else tool.run(db, **args)
         except ToolError as e:  # a mistake the model can fix: tell it what was wrong
             result = {"error": str(e)}
         except (json.JSONDecodeError, TypeError) as e:  # broken JSON, missing or unknown arguments

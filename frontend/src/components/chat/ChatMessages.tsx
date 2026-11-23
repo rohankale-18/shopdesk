@@ -8,6 +8,7 @@ import { Bubble, BubbleContent } from '@/components/ui/bubble'
 import { Button } from '@/components/ui/button'
 import { Message, MessageContent, MessageFooter } from '@/components/ui/message'
 
+import { ActionCard } from './ActionCard'
 import { ChatMarkdown } from './lazyMarkdown'
 
 export function AssistantMark({ className }: { className?: string }) {
@@ -85,10 +86,13 @@ export function AssistantMessage({
 }) {
   // Stable while the tools don't change, so charts aren't redrawn from scratch on every render.
   const data = useMemo(() => tools.flatMap((t) => (t.data ? [t.data] : [])), [tools])
+  // Proposed actions get a card below the reply instead of a chip.
+  const lookups = tools.filter((t) => !t.action_id)
+  const actionIds = [...new Set(tools.flatMap((t) => (t.action_id ? [t.action_id] : [])))]
   return (
     <Message className="group/reply">
       <MessageContent className="gap-1">
-        {tools.length > 0 && <ToolChips tools={tools} />}
+        {lookups.length > 0 && <ToolChips tools={lookups} />}
         {content.trim() ? (
           <div className="chat-md text-[15px] leading-7 text-ink">
             <Suspense fallback={<p className="whitespace-pre-wrap">{content}</p>}>
@@ -100,6 +104,9 @@ export function AssistantMessage({
         ) : (
           streaming && <Typing />
         )}
+        {actionIds.map((id) => (
+          <ActionCard key={id} id={id} />
+        ))}
         {!streaming && (
           <MessageFooter className="-ml-2 px-0 opacity-0 transition-opacity group-hover/reply:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100">
             <CopyButton text={content} />

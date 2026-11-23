@@ -3,6 +3,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import { api, ApiError } from './client'
 import type {
   AIStatus,
+  ChatAction,
   Conversation,
   ConversationSummary,
   Customer,
@@ -261,6 +262,30 @@ export function useSendChatMessage() {
     void qc.invalidateQueries({ queryKey: ['traces', 'list'] })
     return result
   }
+}
+
+// ---------- proposed actions ----------
+
+const actionKey = (id: number) => ['chat', 'action', id] as const
+
+export const useAction = (id: number) =>
+  useQuery({ queryKey: actionKey(id), queryFn: () => api.get<ChatAction>(`/api/chat/actions/${id}`) })
+
+/** Approve (carry out) or reject an action. The store data it touched is refetched. */
+export function useDecideAction() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, approve }: { id: number; approve: boolean }) =>
+      api.post<ChatAction>(`/api/chat/actions/${id}/${approve ? 'approve' : 'reject'}`),
+    onSuccess: (action) => {
+      qc.setQueryData(actionKey(action.id), action)
+      for (const group of ['orders', 'customers', 'products', 'tickets', 'stats']) {
+        void qc.invalidateQueries({ queryKey: [group] })
+      }
+    },
+    // e.g. 409: someone (or another tab) decided it first. Show what it is now.
+    onError: (_, { id }) => qc.invalidateQueries({ queryKey: actionKey(id) }),
+  })
 }
 
 // ---------- traces ----------

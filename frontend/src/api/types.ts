@@ -158,6 +158,8 @@ export interface TicketSummary {
 export interface Ticket extends TicketSummary {
   customer: Customer
   messages: TicketMessage[]
+  /** A reply waiting in the reply box: an assistant draft someone approved. */
+  draft_reply: string | null
 }
 
 export interface TicketUpdate {
@@ -165,6 +167,8 @@ export interface TicketUpdate {
   priority?: TicketPriority
   category?: TicketCategory
   assignee?: string | null
+  /** null discards the draft */
+  draft_reply?: string | null
 }
 
 export interface StatsOverview {
@@ -213,17 +217,34 @@ export interface AIStatus {
 
 export type ChatRole = 'user' | 'assistant'
 
-/** A tool the assistant ran while writing a reply, e.g. "Looked up store overview". */
 /** A data tool's rows, which a ```chart block in the reply can point at by `ref`. */
 export interface ToolData {
   ref: string
   rows: Record<string, string | number | null>[]
 }
 
+/** A tool the assistant ran while writing a reply, e.g. "Looked up store overview". */
 export interface ToolUse {
   name: string
   label: string
   data?: ToolData | null
+  /** Set when the tool proposed an action: the reply shows its Approve / Reject card. */
+  action_id?: number | null
+}
+
+export type ActionStatus = 'pending' | 'done' | 'rejected' | 'failed'
+
+/** A change the assistant proposed. Nothing happens until someone approves it. */
+export interface ChatAction {
+  id: number
+  kind: 'create_refund' | 'cancel_order' | 'draft_ticket_reply'
+  summary: string
+  arguments: Record<string, string | number>
+  status: ActionStatus
+  /** What happened, or why it failed. */
+  outcome: string | null
+  created_at: string
+  decided_at: string | null
 }
 
 export interface ChatMessage {
